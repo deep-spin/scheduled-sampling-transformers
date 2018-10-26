@@ -11,7 +11,9 @@
 
 import onmt.inputters as inputters
 import onmt.utils
-
+from onmt.utils import Statistics, loss
+from onmt.utils.distributed import all_gather_list, \
+    all_reduce_and_rescale_tensors
 from onmt.utils.logging import logger
 
 
@@ -30,21 +32,16 @@ def build_trainer(opt, device_id, model, fields,
         model_saver(:obj:`onmt.models.ModelSaverBase`): the utility object
             used to save the model
     """
-    train_loss = onmt.utils.loss.build_loss_compute(
-        model, fields["tgt"].vocab, opt)
-    valid_loss = onmt.utils.loss.build_loss_compute(
-        model, fields["tgt"].vocab, opt, train=False)
+    train_loss = loss.build_loss_compute(model, fields["tgt"].vocab, opt)
+    valid_loss = loss.build_loss_compute(model, fields["tgt"].vocab, opt,
+                                         train=False)
 
-    trunc_size = opt.truncated_decoder  # Badly named...
+    trunc_size = opt.truncated_decoder
     shard_size = opt.max_generator_batches
     norm_method = opt.normalization
     grad_accum_count = opt.accum_count
-    n_gpu = opt.world_size
-    if device_id >= 0:
-        gpu_rank = opt.gpu_ranks[device_id]
-    else:
-        gpu_rank = 0
-        n_gpu = 0
+    n_gpu = opt.world_size if device_id >= 0 else 0
+    gpu_rank = opt.gpu_ranks[device_id] if device_id >= 0 else 0
     gpu_verbose_level = opt.gpu_verbose_level
 
     report_manager = onmt.utils.build_report_manager(opt)
@@ -103,7 +100,7 @@ class Trainer(object):
 
         assert grad_accum_count > 0
         if grad_accum_count > 1:
-            assert(self.trunc_size == 0), \
+            assert self.trunc_size == 0, \
                 """To enable accumulated gradients,
                    you must disable target sequence truncating."""
 
@@ -131,78 +128,79 @@ class Trainer(object):
         logger.info('Start training...')
 
         step = self.optim._step + 1
-        true_batchs = []
+        true_batches = []
         accum = 0
         normalization = 0
         train_iter = train_iter_fct()
 
-        total_stats = onmt.utils.Statistics()
-        report_stats = onmt.utils.Statistics()
+        total_stats = Statistics()
+        report_stats = Statistics()
         self._start_report_manager(start_time=total_stats.start_time)
 
         while step <= train_steps:
 
             reduce_counter = 0
             for i, batch in enumerate(train_iter):
-                if self.n_gpu == 0 or (i % self.n_gpu == self.gpu_rank):
-                    if self.gpu_verbose_level > 1:
-                        logger.info("GpuRank %d: index: %d accum: %d"
-                                    % (self.gpu_rank, i, accum))
+                if self.n_gpu != 0 and i % self.n_gpu != self.gpu_rank:
+                    continue
+                if self.gpu_verbose_level > 1:
+                    logger.info("GpuRank %d: index: %d accum: %d"
+                                % (self.gpu_rank, i, accum))
 
-                    true_batchs.append(batch)
+                true_batches.append(batch)
 
-                    if self.norm_method == "tokens":
-                        num_tokens = batch.tgt[1:].ne(
-                            self.train_loss.padding_idx).sum()
-                        normalization += num_tokens.item()
-                    else:
-                        normalization += batch.batch_size
-                    accum += 1
-                    if accum == self.grad_accum_count:
-                        reduce_counter += 1
+                if self.norm_method == "tokens":
+                    num_tokens = batch.tgt[1:].ne(
+                        self.train_loss.padding_idx).sum()
+                    normalization += num_tokens.item()
+                else:
+                    normalization += batch.batch_size
+                accum += 1
+                if accum == self.grad_accum_count:
+                    reduce_counter += 1
+                    if self.gpu_verbose_level > 0:
+                        logger.info("GpuRank %d: reduce_counter: %d \
+                                    n_minibatch %d"
+                                    % (self.gpu_rank, reduce_counter,
+                                       len(true_batches)))
+                    if self.n_gpu > 1:
+                        normalization = sum(all_gather_list(normalization))
+
+                    self._gradient_accumulation(
+                        true_batches, normalization, total_stats, report_stats)
+
+                    report_stats = self._maybe_report_training(
+                        step, train_steps,
+                        self.optim.learning_rate,
+                        report_stats)
+
+                    true_batches = []
+                    accum = 0
+                    normalization = 0
+                    if step % valid_steps == 0:
                         if self.gpu_verbose_level > 0:
-                            logger.info("GpuRank %d: reduce_counter: %d \
-                                        n_minibatch %d"
-                                        % (self.gpu_rank, reduce_counter,
-                                           len(true_batchs)))
-                        if self.n_gpu > 1:
-                            normalization = sum(onmt.utils.distributed
-                                                .all_gather_list
-                                                (normalization))
+                            logger.info('GpuRank %d: validate step %d'
+                                        % (self.gpu_rank, step))
+                        valid_iter = valid_iter_fct()
+                        valid_stats = self.validate(valid_iter)
+                        if self.gpu_verbose_level > 0:
+                            logger.info('GpuRank %d: gather valid stat \
+                                        step %d' % (self.gpu_rank, step))
+                        valid_stats = self._maybe_gather_stats(valid_stats)
+                        if self.gpu_verbose_level > 0:
+                            logger.info('GpuRank %d: report stat step %d'
+                                        % (self.gpu_rank, step))
+                        self._report_step(self.optim.learning_rate,
+                                          step, valid_stats=valid_stats)
 
-                        self._gradient_accumulation(
-                            true_batchs, normalization, total_stats,
-                            report_stats)
-
-                        report_stats = self._maybe_report_training(
-                            step, train_steps,
-                            self.optim.learning_rate,
-                            report_stats)
-
-                        true_batchs = []
-                        accum = 0
-                        normalization = 0
-                        if (step % valid_steps == 0):
-                            if self.gpu_verbose_level > 0:
-                                logger.info('GpuRank %d: validate step %d'
-                                            % (self.gpu_rank, step))
-                            valid_iter = valid_iter_fct()
-                            valid_stats = self.validate(valid_iter)
-                            if self.gpu_verbose_level > 0:
-                                logger.info('GpuRank %d: gather valid stat \
-                                            step %d' % (self.gpu_rank, step))
-                            valid_stats = self._maybe_gather_stats(valid_stats)
-                            if self.gpu_verbose_level > 0:
-                                logger.info('GpuRank %d: report stat step %d'
-                                            % (self.gpu_rank, step))
-                            self._report_step(self.optim.learning_rate,
-                                              step, valid_stats=valid_stats)
-
-                        if self.gpu_rank == 0:
-                            self._maybe_save(step)
-                        step += 1
-                        if step > train_steps:
-                            break
+                    if self.gpu_rank == 0:
+                        self._maybe_save(step)
+                    # ideally come up with sane looping conditions so it's
+                    # easier to do things like a variable teacher forcing
+                    # schedule
+                    step += 1
+                    if step > train_steps:
+                        break
             if self.gpu_verbose_level > 0:
                 logger.info('GpuRank %d: we completed an epoch \
                             at step %d' % (self.gpu_rank, step))
@@ -219,7 +217,7 @@ class Trainer(object):
         # Set model in validating mode.
         self.model.eval()
 
-        stats = onmt.utils.Statistics()
+        stats = Statistics()
 
         for batch in valid_iter:
             src = inputters.make_features(batch, 'src', self.data_type)
@@ -247,18 +245,15 @@ class Trainer(object):
 
         return stats
 
-    def _gradient_accumulation(self, true_batchs, normalization, total_stats,
+    def _gradient_accumulation(self, true_batches, normalization, total_stats,
                                report_stats):
         if self.grad_accum_count > 1:
             self.model.zero_grad()
 
-        for batch in true_batchs:
+        for batch in true_batches:
             target_size = batch.tgt.size(0)
             # Truncated BPTT: reminder not compatible with accum > 1
-            if self.trunc_size:
-                trunc_size = self.trunc_size
-            else:
-                trunc_size = target_size
+            trunc_size = self.trunc_size if self.trunc_size else target_size
 
             # dec_state = None
             src = inputters.make_features(batch, 'src', self.data_type)
@@ -294,10 +289,8 @@ class Trainer(object):
                     # Multi GPU gradient gather
                     if self.n_gpu > 1:
                         grads = [p.grad.data for p in self.model.parameters()
-                                 if p.requires_grad
-                                 and p.grad is not None]
-                        onmt.utils.distributed.all_reduce_and_rescale_tensors(
-                            grads, float(1))
+                                 if p.requires_grad and p.grad is not None]
+                        all_reduce_and_rescale_tensors(grads, float(1))
                     self.optim.step()
 
                 # If truncated, don't backprop fully.
@@ -340,7 +333,7 @@ class Trainer(object):
             stat: the updated (or unchanged) stat object
         """
         if stat is not None and self.n_gpu > 1:
-            return onmt.utils.Statistics.all_gather_stats(stat)
+            return Statistics.all_gather_stats(stat)
         return stat
 
     def _maybe_report_training(self, step, num_steps, learning_rate,

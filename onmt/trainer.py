@@ -84,13 +84,13 @@ class Trainer(object):
                  gpu_verbose_level=0, report_manager=None, model_saver=None):
         # Basic attributes.
         self.model = model
-        self.train_loss = train_loss
-        self.valid_loss = valid_loss
+        self._train_loss = train_loss
+        self._valid_loss = valid_loss
         self.optim = optim
         self.trunc_size = trunc_size
         self.shard_size = shard_size
         self.data_type = data_type
-        self.norm_method = norm_method
+        self._norm_method = norm_method
         self.grad_accum_count = grad_accum_count
         self.n_gpu = n_gpu
         self.gpu_rank = gpu_rank
@@ -98,11 +98,7 @@ class Trainer(object):
         self.report_manager = report_manager
         self.model_saver = model_saver
 
-        assert grad_accum_count > 0
-        if grad_accum_count > 1:
-            assert self.trunc_size == 0, \
-                """To enable accumulated gradients,
-                   you must disable target sequence truncating."""
+        assert grad_accum_count == 1  # disable grad accumulation
 
         # Set model in training mode.
         self.model.train()
@@ -121,16 +117,10 @@ class Trainer(object):
             train_steps(int):
             valid_steps(int):
             save_checkpoint_steps(int):
-
-        Return:
-            None
         """
         logger.info('Start training...')
 
         step = self.optim._step + 1
-        true_batches = []
-        accum = 0
-        normalization = 0
         train_iter = train_iter_fct()
 
         total_stats = Statistics()
@@ -139,71 +129,36 @@ class Trainer(object):
 
         while step <= train_steps:
 
-            reduce_counter = 0
             for i, batch in enumerate(train_iter):
                 if self.n_gpu != 0 and i % self.n_gpu != self.gpu_rank:
                     continue
-                if self.gpu_verbose_level > 1:
-                    logger.info("GpuRank %d: index: %d accum: %d"
-                                % (self.gpu_rank, i, accum))
 
-                true_batches.append(batch)
+                norm = self._norm(batch)
 
-                if self.norm_method == "tokens":
-                    num_tokens = batch.tgt[1:].ne(
-                        self.train_loss.padding_idx).sum()
-                    normalization += num_tokens.item()
-                else:
-                    normalization += batch.batch_size
-                accum += 1
-                if accum == self.grad_accum_count:
-                    reduce_counter += 1
-                    if self.gpu_verbose_level > 0:
-                        logger.info("GpuRank %d: reduce_counter: %d \
-                                    n_minibatch %d"
-                                    % (self.gpu_rank, reduce_counter,
-                                       len(true_batches)))
-                    if self.n_gpu > 1:
-                        normalization = sum(all_gather_list(normalization))
+                self._train_batch(batch, norm, total_stats, report_stats)
 
-                    self._gradient_accumulation(
-                        true_batches, normalization, total_stats, report_stats)
+                report_stats = self._maybe_report_training(
+                    step, train_steps,
+                    self.optim.learning_rate,
+                    report_stats)
 
-                    report_stats = self._maybe_report_training(
-                        step, train_steps,
-                        self.optim.learning_rate,
-                        report_stats)
+                if step % valid_steps == 0:
+                    valid_iter = valid_iter_fct()
+                    valid_stats = self.validate(valid_iter)
 
-                    true_batches = []
-                    accum = 0
-                    normalization = 0
-                    if step % valid_steps == 0:
-                        if self.gpu_verbose_level > 0:
-                            logger.info('GpuRank %d: validate step %d'
-                                        % (self.gpu_rank, step))
-                        valid_iter = valid_iter_fct()
-                        valid_stats = self.validate(valid_iter)
-                        if self.gpu_verbose_level > 0:
-                            logger.info('GpuRank %d: gather valid stat \
-                                        step %d' % (self.gpu_rank, step))
-                        valid_stats = self._maybe_gather_stats(valid_stats)
-                        if self.gpu_verbose_level > 0:
-                            logger.info('GpuRank %d: report stat step %d'
-                                        % (self.gpu_rank, step))
-                        self._report_step(self.optim.learning_rate,
-                                          step, valid_stats=valid_stats)
+                    valid_stats = self._maybe_gather_stats(valid_stats)
 
-                    if self.gpu_rank == 0:
-                        self._maybe_save(step)
-                    # ideally come up with sane looping conditions so it's
-                    # easier to do things like a variable teacher forcing
-                    # schedule
-                    step += 1
-                    if step > train_steps:
-                        break
-            if self.gpu_verbose_level > 0:
-                logger.info('GpuRank %d: we completed an epoch \
-                            at step %d' % (self.gpu_rank, step))
+                    self._report_step(self.optim.learning_rate,
+                                      step, valid_stats=valid_stats)
+
+                if self.gpu_rank == 0:
+                    self._maybe_save(step)
+                # ideally come up with sane looping conditions so it's
+                # easier to do things like a variable teacher forcing
+                # schedule
+                step += 1
+                if step > train_steps:
+                    break
             train_iter = train_iter_fct()
 
         return total_stats
@@ -234,7 +189,7 @@ class Trainer(object):
             outputs, attns = self.model(src, tgt, src_lengths)
 
             # Compute loss.
-            batch_stats = self.valid_loss.monolithic_compute_loss(
+            batch_stats = self._valid_loss.monolithic_compute_loss(
                 batch, outputs, attns)
 
             # Update statistics.
@@ -245,71 +200,49 @@ class Trainer(object):
 
         return stats
 
-    def _gradient_accumulation(self, true_batches, normalization, total_stats,
-                               report_stats):
-        if self.grad_accum_count > 1:
+    def _train_batch(self, batch, normalization, total_stats, report_stats):
+        target_size = batch.tgt.size(0)
+        trunc_size = self.trunc_size if self.trunc_size else target_size
+
+        dec_state = None
+        src = inputters.make_features(batch, 'src', self.data_type)
+        if self.data_type == 'text':
+            _, src_lengths = batch.src
+            report_stats.n_src_words += src_lengths.sum().item()
+        elif self.data_type == 'audio':
+            src_lengths = batch.src_lengths
+        else:
+            src_lengths = None
+
+        tgt_outer = inputters.make_features(batch, 'tgt')
+
+        for j in range(0, target_size-1, trunc_size):
+            # 1. Create truncated target.
+            tgt = tgt_outer[j: j + trunc_size]
+
+            # 2. F-prop all but generator.
             self.model.zero_grad()
+            outputs, attns, dec_state = \
+                self.model(src, tgt, src_lengths, dec_state)
 
-        for batch in true_batches:
-            target_size = batch.tgt.size(0)
-            # Truncated BPTT: reminder not compatible with accum > 1
-            trunc_size = self.trunc_size if self.trunc_size else target_size
+            # 3. Compute loss in shards for memory efficiency.
+            batch_stats = self._train_loss.sharded_compute_loss(
+                batch, outputs, attns, j,
+                trunc_size, self.shard_size, normalization)
+            total_stats.update(batch_stats)
+            report_stats.update(batch_stats)
 
-            # dec_state = None
-            src = inputters.make_features(batch, 'src', self.data_type)
-            if self.data_type == 'text':
-                _, src_lengths = batch.src
-                report_stats.n_src_words += src_lengths.sum().item()
-            elif self.data_type == 'audio':
-                src_lengths = batch.src_lengths
-            else:
-                src_lengths = None
-
-            tgt_outer = inputters.make_features(batch, 'tgt')
-
-            for j in range(0, target_size-1, trunc_size):
-                # 1. Create truncated target.
-                tgt = tgt_outer[j: j + trunc_size]
-
-                # 2. F-prop all but generator.
-                if self.grad_accum_count == 1:
-                    self.model.zero_grad()
-                outputs, attns = \
-                    self.model(src, tgt, src_lengths)
-
-                # 3. Compute loss in shards for memory efficiency.
-                batch_stats = self.train_loss.sharded_compute_loss(
-                    batch, outputs, attns, j,
-                    trunc_size, self.shard_size, normalization)
-                total_stats.update(batch_stats)
-                report_stats.update(batch_stats)
-
-                # 4. Update the parameters and statistics.
-                if self.grad_accum_count == 1:
-                    # Multi GPU gradient gather
-                    if self.n_gpu > 1:
-                        grads = [p.grad.data for p in self.model.parameters()
-                                 if p.requires_grad and p.grad is not None]
-                        all_reduce_and_rescale_tensors(grads, float(1))
-                    self.optim.step()
-
-                # If truncated, don't backprop fully.
-                # TO CHECK
-                # if dec_state is not None:
-                #    dec_state.detach()
-                if self.model.decoder.state is not None:
-                    self.model.decoder.detach_state()
-
-        # in case of multi step gradient accumulation,
-        # update only after accum batches
-        if self.grad_accum_count > 1:
+            # 4. Update the parameters and statistics.
+            # Multi GPU gradient gather
             if self.n_gpu > 1:
                 grads = [p.grad.data for p in self.model.parameters()
-                         if p.requires_grad
-                         and p.grad is not None]
-                onmt.utils.distributed.all_reduce_and_rescale_tensors(
-                    grads, float(1))
+                         if p.requires_grad and p.grad is not None]
+                all_reduce_and_rescale_tensors(grads, 1.0)
             self.optim.step()
+
+            # If truncated, don't backprop fully.
+            if self.model.decoder.state is not None:
+                self.model.decoder.detach_state()
 
     def _start_report_manager(self, start_time=None):
         """
@@ -364,3 +297,12 @@ class Trainer(object):
         """
         if self.model_saver is not None:
             self.model_saver.maybe_save(step)
+
+    def _norm(self, batch):
+        if self._norm_method == "tokens":
+            norm = batch.tgt[1:].ne(self._train_loss.padding_idx).sum()
+        else:
+            norm = batch.batch_size
+        if self.n_gpu > 1:
+            norm = sum(all_gather_list(norm))
+        return norm

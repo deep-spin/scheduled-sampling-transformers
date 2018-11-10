@@ -9,6 +9,7 @@
           users of this library) for the strategy things we do.
 """
 
+import torch
 import onmt.inputters as inputters
 import onmt.utils
 from onmt.utils import Statistics, loss
@@ -82,7 +83,6 @@ class Trainer(object):
                  trunc_size=0, shard_size=32, data_type='text',
                  norm_method="sents", grad_accum_count=1, n_gpu=1, gpu_rank=1,
                  gpu_verbose_level=0, report_manager=None, model_saver=None):
-        # Basic attributes.
         self.model = model
         self._train_loss = train_loss
         self._valid_loss = valid_loss
@@ -100,7 +100,6 @@ class Trainer(object):
 
         assert grad_accum_count == 1  # disable grad accumulation
 
-        # Set model in training mode.
         self.model.train()
 
     def train(self, train_iter_fct, valid_iter_fct, train_steps, valid_steps):
@@ -120,7 +119,7 @@ class Trainer(object):
         """
         logger.info('Start training...')
 
-        step = self.optim._step + 1
+        step = self.optim._step + 1  # this is dumb
         train_iter = train_iter_fct()
 
         total_stats = Statistics()
@@ -129,13 +128,14 @@ class Trainer(object):
 
         while step <= train_steps:
 
+            # there should be only one loop
             for i, batch in enumerate(train_iter):
                 if self.n_gpu != 0 and i % self.n_gpu != self.gpu_rank:
                     continue
 
                 norm = self._norm(batch)
 
-                self._train_batch(batch, norm, total_stats, report_stats)
+                self._train_batch(batch, norm, total_stats, report_stats, True)
 
                 report_stats = self._maybe_report_training(
                     step, train_steps,
@@ -174,37 +174,38 @@ class Trainer(object):
 
         stats = Statistics()
 
-        for batch in valid_iter:
-            src = inputters.make_features(batch, 'src', self.data_type)
-            if self.data_type == 'text':
-                _, src_lengths = batch.src
-            elif self.data_type == 'audio':
-                src_lengths = batch.src_lengths
-            else:
-                src_lengths = None
+        with torch.no_grad():
+            for batch in valid_iter:
+                src = inputters.make_features(batch, 'src', self.data_type)
+                if self.data_type == 'text':
+                    _, src_lengths = batch.src
+                elif self.data_type == 'audio':
+                    src_lengths = batch.src_lengths
+                else:
+                    src_lengths = None
 
-            tgt = inputters.make_features(batch, 'tgt')
+                tgt = inputters.make_features(batch, 'tgt')
 
-            # F-prop through the model.
-            outputs, attns = self.model(src, tgt, src_lengths)
+                # F-prop through the model.
+                outputs, attns = self.model(src, tgt, src_lengths)
 
-            # Compute loss.
-            batch_stats = self._valid_loss.monolithic_compute_loss(
-                batch, outputs, attns)
+                # Compute loss.
+                batch_stats = self._valid_loss.monolithic_compute_loss(
+                    batch, outputs, attns)
 
-            # Update statistics.
-            stats.update(batch_stats)
+                # Update statistics.
+                stats.update(batch_stats)
 
         # Set model back to training mode.
         self.model.train()
 
         return stats
 
-    def _train_batch(self, batch, normalization, total_stats, report_stats):
+    def _train_batch(self, batch, normalization, total_stats, report_stats,
+                     teacher_forcing):
         target_size = batch.tgt.size(0)
         trunc_size = self.trunc_size if self.trunc_size else target_size
 
-        dec_state = None
         src = inputters.make_features(batch, 'src', self.data_type)
         if self.data_type == 'text':
             _, src_lengths = batch.src
@@ -216,14 +217,39 @@ class Trainer(object):
 
         tgt_outer = inputters.make_features(batch, 'tgt')
 
+        dec_state = None
         for j in range(0, target_size-1, trunc_size):
             # 1. Create truncated target.
             tgt = tgt_outer[j: j + trunc_size]
 
             # 2. F-prop all but generator.
             self.model.zero_grad()
-            outputs, attns, dec_state = \
-                self.model(src, tgt, src_lengths, dec_state)
+            if teacher_forcing:
+                outputs, attns, dec_state = \
+                    self.model(src, tgt, src_lengths, dec_state)
+                # bpop important note: the output layer has not been applied to
+                # these outputs yet, so you can't use the outputs tensor by
+                # itself to get the model's next prediction.
+            else:
+                enc_final, mem_bank, lengths = self.model.encoder(
+                    src, src_lengths)
+                dec_state = self.model.decoder.init_decoder_state(
+                    src, mem_bank, enc_final)
+
+                tgt_input = tgt[0].unsqueeze(0)
+                out_list = []
+                for i in range(len(tgt) - 1):
+                    # it's not clear to me this is the correct thing to do
+                    # with attns. I'm not sure what differs between the values
+                    # returned at each time step
+                    dec_out, dec_state, attns = self.model.decoder(
+                        tgt_input, mem_bank, dec_state,
+                        memory_lengths=lengths)
+                    out_list.append(dec_out)
+                    tgt_input = self.model.generator(
+                        dec_out).argmax(dim=2).unsqueeze(2)
+
+                outputs = torch.cat(out_list)
 
             # 3. Compute loss in shards for memory efficiency.
             batch_stats = self._train_loss.sharded_compute_loss(

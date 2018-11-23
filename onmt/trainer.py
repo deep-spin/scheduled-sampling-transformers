@@ -9,6 +9,7 @@
           users of this library) for the strategy things we do.
 """
 
+import random
 import torch
 import onmt.inputters as inputters
 import onmt.utils
@@ -44,13 +45,15 @@ def build_trainer(opt, device_id, model, fields,
     n_gpu = opt.world_size if device_id >= 0 else 0
     gpu_rank = opt.gpu_ranks[device_id] if device_id >= 0 else 0
     gpu_verbose_level = opt.gpu_verbose_level
+    teacher_forcing_ratio = opt.teacher_forcing_ratio
 
     report_manager = onmt.utils.build_report_manager(opt)
     trainer = onmt.Trainer(model, train_loss, valid_loss, optim, trunc_size,
                            shard_size, data_type, norm_method,
                            grad_accum_count, n_gpu, gpu_rank,
                            gpu_verbose_level, report_manager,
-                           model_saver=model_saver)
+                           model_saver=model_saver,
+                           teacher_forcing_ratio=teacher_forcing_ratio)
     return trainer
 
 
@@ -82,7 +85,8 @@ class Trainer(object):
     def __init__(self, model, train_loss, valid_loss, optim,
                  trunc_size=0, shard_size=32, data_type='text',
                  norm_method="sents", grad_accum_count=1, n_gpu=1, gpu_rank=1,
-                 gpu_verbose_level=0, report_manager=None, model_saver=None):
+                 gpu_verbose_level=0, report_manager=None, model_saver=None,
+                 teacher_forcing_ratio=1.0):
         self.model = model
         self._train_loss = train_loss
         self._valid_loss = valid_loss
@@ -97,6 +101,7 @@ class Trainer(object):
         self.gpu_verbose_level = gpu_verbose_level
         self.report_manager = report_manager
         self.model_saver = model_saver
+        self._teacher_forcing_ratio = teacher_forcing_ratio
 
         assert grad_accum_count == 1  # disable grad accumulation
 
@@ -135,7 +140,10 @@ class Trainer(object):
 
                 norm = self._norm(batch)
 
-                self._train_batch(batch, norm, total_stats, report_stats, True)
+                use_tf = random.random() < self._teacher_forcing_ratio
+                self._train_batch(
+                    batch, norm, total_stats, report_stats, use_tf
+                )
 
                 report_stats = self._maybe_report_training(
                     step, train_steps,

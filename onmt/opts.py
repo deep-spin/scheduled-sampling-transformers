@@ -421,9 +421,18 @@ def train_opts(parser):
                        Set to zero to turn off label smoothing.
                        For more detailed information, see:
                        https://arxiv.org/abs/1512.00567""")
-    group.add_argument('-teacher_forcing_ratio', type=float, default=1.0,
-                       help="""Probability that teacher forcing will be applied
-                       to a batch.""")
+    group.add_argument('-sampling_type', type=str, default="teacher_forcing",
+                       help="""The sampling strategy for the decoder input. 
+                       Can be one of the values: 
+                       teacher_forcing, always_sample, scheduled""")
+    group.add_argument('-scheduled_sampling_decay', type=str, default="exp",
+                       help="""Scheduled sampling decay. Can be one of the values: 
+                       linear, exp, sigmoid.""")
+    group.add_argument('-scheduled_sampling_k', type=float, default=1.0,
+                       help="""Const k for the scheduled sampling decay. 
+                       The value depends on the selected decay schedule.""")
+    group.add_argument('-scheduled_sampling_c', type=float, default=1.0,
+                       help="""Const c for scheduled sampling with linear decay.""")
     # learning rate
     group = parser.add_argument_group('Optimization- Rate')
     group.add('--learning_rate', '-learning_rate', type=float, default=1.0,

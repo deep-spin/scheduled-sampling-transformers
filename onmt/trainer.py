@@ -45,7 +45,10 @@ def build_trainer(opt, device_id, model, fields,
     n_gpu = opt.world_size if device_id >= 0 else 0
     gpu_rank = opt.gpu_ranks[device_id] if device_id >= 0 else 0
     gpu_verbose_level = opt.gpu_verbose_level
-    teacher_forcing_ratio = opt.teacher_forcing_ratio
+    sampling_type = opt.sampling_type
+    scheduled_sampling_decay = opt.scheduled_sampling_decay
+    scheduled_sampling_k = opt.scheduled_sampling_k
+    scheduled_sampling_c = opt.scheduled_sampling_c
 
     report_manager = onmt.utils.build_report_manager(opt)
     trainer = onmt.Trainer(model, train_loss, valid_loss, optim, trunc_size,
@@ -53,7 +56,10 @@ def build_trainer(opt, device_id, model, fields,
                            grad_accum_count, n_gpu, gpu_rank,
                            gpu_verbose_level, report_manager,
                            model_saver=model_saver,
-                           teacher_forcing_ratio=teacher_forcing_ratio)
+                           sampling_type=sampling_type,
+                           scheduled_sampling_decay=scheduled_sampling_decay,
+                           scheduled_sampling_k=scheduled_sampling_k,
+                           scheduled_sampling_c=scheduled_sampling_c)
     return trainer
 
 
@@ -86,7 +92,8 @@ class Trainer(object):
                  trunc_size=0, shard_size=32, data_type='text',
                  norm_method="sents", grad_accum_count=1, n_gpu=1, gpu_rank=1,
                  gpu_verbose_level=0, report_manager=None, model_saver=None,
-                 teacher_forcing_ratio=1.0):
+                 sampling_type="teacher_forcing", scheduled_sampling_decay="exp",
+                 scheduled_sampling_k=1.0, scheduled_sampling_c=1.0):
         self.model = model
         self._train_loss = train_loss
         self._valid_loss = valid_loss
@@ -101,7 +108,10 @@ class Trainer(object):
         self.gpu_verbose_level = gpu_verbose_level
         self.report_manager = report_manager
         self.model_saver = model_saver
-        self._teacher_forcing_ratio = teacher_forcing_ratio
+        self._sampling_type = sampling_type
+        self._scheduled_sampling_decay = scheduled_sampling_decay
+        self._scheduled_sampling_k = scheduled_sampling_k
+        self._scheduled_sampling_c = scheduled_sampling_c
 
         assert grad_accum_count == 1  # disable grad accumulation
 
@@ -140,9 +150,13 @@ class Trainer(object):
 
                 norm = self._norm(batch)
 
-                use_tf = random.random() < self._teacher_forcing_ratio
+                batch_teacher_forcing_ratio = self._calc_teacher_forcing_ratio(step, 
+                                                self._sampling_type,
+                                                self._scheduled_sampling_decay, 
+                                                self._scheduled_sampling_k,
+                                                self._scheduled_sampling_c)
                 self._train_batch(
-                    batch, norm, total_stats, report_stats, use_tf
+                    batch, norm, total_stats, report_stats, batch_teacher_forcing_ratio
                 )
 
                 report_stats = self._maybe_report_training(
@@ -209,8 +223,21 @@ class Trainer(object):
 
         return stats
 
+    def _calc_teacher_forcing_ratio(self, step, sampling_type, scheduled_sampling_decay,
+                                    scheduled_sampling_k, scheduled_sampling_c):
+        # TODO: This only calculates exponential with hardcoded k
+        # Needs to be extended to more methods and option passing
+        if sampling_type == "teacher_forcing":
+            return 1.0
+        elif sampling_type == "always_sample":
+            return 0.0
+        else: # scheduled sampling
+            # TODO: add here more decay variants
+            # for now, using only exponential
+            return scheduled_sampling_k**step
+
     def _train_batch(self, batch, normalization, total_stats, report_stats,
-                     teacher_forcing):
+                     teacher_forcing_ratio):
         target_size = batch.tgt.size(0)
         trunc_size = self.trunc_size if self.trunc_size else target_size
 
@@ -232,7 +259,7 @@ class Trainer(object):
 
             # 2. F-prop all but generator.
             self.model.zero_grad()
-            if teacher_forcing:
+            if teacher_forcing_ratio >= 1:
                 outputs, attns, dec_state = \
                     self.model(src, tgt, src_lengths, dec_state)
                 # bpop important note: the output layer has not been applied to
@@ -246,7 +273,7 @@ class Trainer(object):
 
                 tgt_input = tgt[0].unsqueeze(0)
                 out_list = []
-                for i in range(len(tgt) - 1):
+                for i in range(1, len(tgt)):
                     # it's not clear to me this is the correct thing to do
                     # with attns. I'm not sure what differs between the values
                     # returned at each time step
@@ -254,8 +281,15 @@ class Trainer(object):
                         tgt_input, mem_bank, dec_state,
                         memory_lengths=lengths)
                     out_list.append(dec_out)
-                    tgt_input = self.model.generator(
-                        dec_out).argmax(dim=2).unsqueeze(2)
+
+                    # We flip a coin to decide whether to use teacher forcing 
+                    # at each time step
+                    use_tf = random.random() < teacher_forcing_ratio
+                    if use_tf:
+                        tgt_input = tgt[i].unsqueeze(0)
+                    else:
+                        tgt_input = self.model.generator(
+                            dec_out).argmax(dim=2).unsqueeze(2)
 
                 outputs = torch.cat(out_list)
 

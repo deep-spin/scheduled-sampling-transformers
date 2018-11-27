@@ -10,6 +10,7 @@
 """
 
 import random
+import math
 import torch
 import onmt.inputters as inputters
 import onmt.utils
@@ -233,7 +234,7 @@ class Trainer(object):
             elif self._scheduled_sampling_decay == "sigmoid":
                 return self._scheduled_sampling_k / (
                             self._scheduled_sampling_k 
-                                + exp(step / self._scheduled_sampling_k)
+                                + math.exp(step / self._scheduled_sampling_k)
                             )
             else: #linear 
                 return max(self._scheduled_sampling_limit, 

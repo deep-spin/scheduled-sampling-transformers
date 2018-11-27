@@ -150,11 +150,7 @@ class Trainer(object):
 
                 norm = self._norm(batch)
 
-                batch_teacher_forcing_ratio = self._calc_teacher_forcing_ratio(step, 
-                                                self._sampling_type,
-                                                self._scheduled_sampling_decay, 
-                                                self._scheduled_sampling_k,
-                                                self._scheduled_sampling_c)
+                batch_teacher_forcing_ratio = self._calc_teacher_forcing_ratio(step)
                 self._train_batch(
                     batch, norm, total_stats, report_stats, batch_teacher_forcing_ratio
                 )
@@ -223,18 +219,17 @@ class Trainer(object):
 
         return stats
 
-    def _calc_teacher_forcing_ratio(self, step, sampling_type, scheduled_sampling_decay,
-                                    scheduled_sampling_k, scheduled_sampling_c):
+    def _calc_teacher_forcing_ratio(self, step):
         # TODO: This only calculates exponential with hardcoded k
         # Needs to be extended to more methods and option passing
-        if sampling_type == "teacher_forcing":
+        if self.sampling_type == "teacher_forcing":
             return 1.0
-        elif sampling_type == "always_sample":
+        elif self.sampling_type == "always_sample":
             return 0.0
         else: # scheduled sampling
             # TODO: add here more decay variants
             # for now, using only exponential
-            return scheduled_sampling_k**step
+            return self.scheduled_sampling_k**step
 
     def _train_batch(self, batch, normalization, total_stats, report_stats,
                      teacher_forcing_ratio):

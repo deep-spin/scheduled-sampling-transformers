@@ -433,6 +433,9 @@ def train_opts(parser):
                        The value depends on the selected decay schedule.""")
     group.add_argument('-scheduled_sampling_c', type=float, default=1.0,
                        help="""Const c for scheduled sampling with linear decay.""")
+    group.add_argument('-scheduled_sampling_limit', type=float, default=0.0,
+                       help="""Minimum decay value for scheduled sampling 
+                       with linear decay.""")
     # learning rate
     group = parser.add_argument_group('Optimization- Rate')
     group.add('--learning_rate', '-learning_rate', type=float, default=1.0,

@@ -49,6 +49,7 @@ def build_trainer(opt, device_id, model, fields,
     scheduled_sampling_decay = opt.scheduled_sampling_decay
     scheduled_sampling_k = opt.scheduled_sampling_k
     scheduled_sampling_c = opt.scheduled_sampling_c
+    scheduled_sampling_limit = opt.scheduled_sampling_limit
 
     report_manager = onmt.utils.build_report_manager(opt)
     trainer = onmt.Trainer(model, train_loss, valid_loss, optim, trunc_size,
@@ -59,7 +60,8 @@ def build_trainer(opt, device_id, model, fields,
                            sampling_type=sampling_type,
                            scheduled_sampling_decay=scheduled_sampling_decay,
                            scheduled_sampling_k=scheduled_sampling_k,
-                           scheduled_sampling_c=scheduled_sampling_c)
+                           scheduled_sampling_c=scheduled_sampling_c,
+                           scheduled_sampling_limit=scheduled_sampling_limit)
     return trainer
 
 
@@ -93,7 +95,8 @@ class Trainer(object):
                  norm_method="sents", grad_accum_count=1, n_gpu=1, gpu_rank=1,
                  gpu_verbose_level=0, report_manager=None, model_saver=None,
                  sampling_type="teacher_forcing", scheduled_sampling_decay="exp",
-                 scheduled_sampling_k=1.0, scheduled_sampling_c=1.0):
+                 scheduled_sampling_k=1.0, scheduled_sampling_c=1.0,
+                 scheduled_sampling_limit=0.0):
         self.model = model
         self._train_loss = train_loss
         self._valid_loss = valid_loss
@@ -112,6 +115,7 @@ class Trainer(object):
         self._scheduled_sampling_decay = scheduled_sampling_decay
         self._scheduled_sampling_k = scheduled_sampling_k
         self._scheduled_sampling_c = scheduled_sampling_c
+        self._scheduled_sampling_limit = scheduled_sampling_limit
 
         assert grad_accum_count == 1  # disable grad accumulation
 
@@ -219,17 +223,26 @@ class Trainer(object):
 
         return stats
 
+
     def _calc_teacher_forcing_ratio(self, step):
-        # TODO: This only calculates exponential with hardcoded k
-        # Needs to be extended to more methods and option passing
         if self.sampling_type == "teacher_forcing":
             return 1.0
-        elif self.sampling_type == "always_sample":
+        elif self.sampling_type == "scheduled": # scheduled sampling
+            if self.scheduled_sampling_decay == "exp":
+                return self.scheduled_sampling_k ** step
+            elif self.scheduled_sampling_decay == "sigmoid":
+                return self.scheduled_sampling_k / (
+                            self.scheduled_sampling_k 
+                                + exp(step / self.scheduled_sampling_k)
+                            )
+            else: #linear 
+                return max(self.scheduled_sampling_limit, 
+                            self.scheduled_sampling_k 
+                                - self.scheduled_sampling_c * step
+                            )
+        else: # always sample from the model predictions
             return 0.0
-        else: # scheduled sampling
-            # TODO: add here more decay variants
-            # for now, using only exponential
-            return self.scheduled_sampling_k**step
+
 
     def _train_batch(self, batch, normalization, total_stats, report_stats,
                      teacher_forcing_ratio):

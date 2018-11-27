@@ -225,20 +225,20 @@ class Trainer(object):
 
 
     def _calc_teacher_forcing_ratio(self, step):
-        if self.sampling_type == "teacher_forcing":
+        if self._sampling_type == "teacher_forcing":
             return 1.0
-        elif self.sampling_type == "scheduled": # scheduled sampling
-            if self.scheduled_sampling_decay == "exp":
-                return self.scheduled_sampling_k ** step
-            elif self.scheduled_sampling_decay == "sigmoid":
-                return self.scheduled_sampling_k / (
-                            self.scheduled_sampling_k 
-                                + exp(step / self.scheduled_sampling_k)
+        elif self._sampling_type == "scheduled": # scheduled sampling
+            if self._scheduled_sampling_decay == "exp":
+                return self._scheduled_sampling_k ** step
+            elif self._scheduled_sampling_decay == "sigmoid":
+                return self._scheduled_sampling_k / (
+                            self._scheduled_sampling_k 
+                                + exp(step / self._scheduled_sampling_k)
                             )
             else: #linear 
-                return max(self.scheduled_sampling_limit, 
-                            self.scheduled_sampling_k 
-                                - self.scheduled_sampling_c * step
+                return max(self._scheduled_sampling_limit, 
+                            self._scheduled_sampling_k 
+                                - self._scheduled_sampling_c * step
                             )
         else: # always sample from the model predictions
             return 0.0

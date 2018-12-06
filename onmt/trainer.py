@@ -271,7 +271,7 @@ class Trainer(object):
             self.model.zero_grad()
             if teacher_forcing_ratio >= 1:
                 outputs, attns = \
-                    self.model(src, tgt, src_lengths, dec_state)
+                    self.model(src, tgt, src_lengths)
                 # bpop important note: the output layer has not been applied to
                 # these outputs yet, so you can't use the outputs tensor by
                 # itself to get the model's next prediction.

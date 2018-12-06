@@ -95,7 +95,8 @@ class Trainer(object):
                  trunc_size=0, shard_size=32, data_type='text',
                  norm_method="sents", grad_accum_count=1, n_gpu=1, gpu_rank=1,
                  gpu_verbose_level=0, report_manager=None, model_saver=None,
-                 sampling_type="teacher_forcing", scheduled_sampling_decay="exp",
+                 sampling_type="teacher_forcing",
+                 scheduled_sampling_decay="exp",
                  scheduled_sampling_k=1.0, scheduled_sampling_c=1.0,
                  scheduled_sampling_limit=0.0):
         self.model = model
@@ -155,9 +156,11 @@ class Trainer(object):
 
                 norm = self._norm(batch)
 
-                batch_teacher_forcing_ratio = self._calc_teacher_forcing_ratio(step)
+                batch_teacher_forcing_ratio = \
+                    self._calc_teacher_forcing_ratio(step)
                 self._train_batch(
-                    batch, norm, total_stats, report_stats, batch_teacher_forcing_ratio
+                    batch, norm, total_stats, report_stats,
+                    batch_teacher_forcing_ratio
                 )
 
                 report_stats = self._maybe_report_training(
@@ -224,26 +227,24 @@ class Trainer(object):
 
         return stats
 
-
     def _calc_teacher_forcing_ratio(self, step):
         if self._sampling_type == "teacher_forcing":
             return 1.0
-        elif self._sampling_type == "scheduled": # scheduled sampling
+        elif self._sampling_type == "scheduled":  # scheduled sampling
             if self._scheduled_sampling_decay == "exp":
                 return self._scheduled_sampling_k ** step
             elif self._scheduled_sampling_decay == "sigmoid":
                 return self._scheduled_sampling_k / (
-                            self._scheduled_sampling_k 
-                                + math.exp(step / self._scheduled_sampling_k)
+                            self._scheduled_sampling_k
+                            + math.exp(step / self._scheduled_sampling_k)
                             )
-            else: #linear 
-                return max(self._scheduled_sampling_limit, 
-                            self._scheduled_sampling_k 
-                                - self._scheduled_sampling_c * step
-                            )
-        else: # always sample from the model predictions
+            else:  # linear
+                return max(
+                    self._scheduled_sampling_limit,
+                    self._scheduled_sampling_k -
+                    self._scheduled_sampling_c * step)
+        else:  # always sample from the model predictions
             return 0.0
-
 
     def _train_batch(self, batch, normalization, total_stats, report_stats,
                      teacher_forcing_ratio):
@@ -269,16 +270,15 @@ class Trainer(object):
             # 2. F-prop all but generator.
             self.model.zero_grad()
             if teacher_forcing_ratio >= 1:
-                outputs, attns, dec_state = \
+                outputs, attns = \
                     self.model(src, tgt, src_lengths, dec_state)
                 # bpop important note: the output layer has not been applied to
                 # these outputs yet, so you can't use the outputs tensor by
                 # itself to get the model's next prediction.
             else:
-                enc_final, mem_bank, lengths = self.model.encoder(
-                    src, src_lengths)
-                dec_state = self.model.decoder.init_decoder_state(
-                    src, mem_bank, enc_final)
+                enc_state, memory_bank, lengths = \
+                    self.model.encoder(src, src_lengths)
+                self.model.decoder.init_state(src, memory_bank, enc_state)
 
                 tgt_input = tgt[0].unsqueeze(0)
                 out_list = []
@@ -286,12 +286,12 @@ class Trainer(object):
                     # it's not clear to me this is the correct thing to do
                     # with attns. I'm not sure what differs between the values
                     # returned at each time step
-                    dec_out, dec_state, attns = self.model.decoder(
-                        tgt_input, mem_bank, dec_state,
+                    dec_out, attns = self.model.decoder(
+                        tgt_input, memory_bank,
                         memory_lengths=lengths)
                     out_list.append(dec_out)
 
-                    # We flip a coin to decide whether to use teacher forcing 
+                    # We flip a coin to decide whether to use teacher forcing
                     # at each time step
                     use_tf = random.random() < teacher_forcing_ratio
                     if use_tf:
@@ -318,8 +318,8 @@ class Trainer(object):
             self.optim.step()
 
             # If truncated, don't backprop fully.
-            if self.model.decoder.state is not None:
-                self.model.decoder.detach_state()
+            if dec_state is not None:
+                dec_state.detach()
 
     def _start_report_manager(self, start_time=None):
         """

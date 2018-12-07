@@ -13,6 +13,12 @@ def config_opts(parser):
                help='config file save path')
 
 
+def none_or_int(value):
+    if value == 'None':
+        return None
+    return value
+
+
 def model_opts(parser):
     """
     These options are passed to the construction of the model.
@@ -457,7 +463,7 @@ def train_opts(parser):
                        validation set or (ii) steps have gone past
                        start_decay_steps""")
     group.add('--start_decay_steps', '-start_decay_steps',
-              type=int, default=50000,
+              type=none_or_int, default=None,
               help="""Start decaying every decay_steps after
                        start_decay_steps""")
     group.add('--decay_steps', '-decay_steps', type=int, default=10000,

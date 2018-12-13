@@ -51,6 +51,8 @@ def build_trainer(opt, device_id, model, fields,
     scheduled_sampling_k = opt.scheduled_sampling_k
     scheduled_sampling_c = opt.scheduled_sampling_c
     scheduled_sampling_limit = opt.scheduled_sampling_limit
+    mixture_type = opt.mixture_type
+    topk_value = opt.topk_value
 
     report_manager = onmt.utils.build_report_manager(opt)
     trainer = onmt.Trainer(model, train_loss, valid_loss, optim, trunc_size,
@@ -62,7 +64,9 @@ def build_trainer(opt, device_id, model, fields,
                            scheduled_sampling_decay=scheduled_sampling_decay,
                            scheduled_sampling_k=scheduled_sampling_k,
                            scheduled_sampling_c=scheduled_sampling_c,
-                           scheduled_sampling_limit=scheduled_sampling_limit)
+                           scheduled_sampling_limit=scheduled_sampling_limit,
+                           mixture_type=mixture_type,
+                           topk_value=topk_value)
     return trainer
 
 
@@ -98,7 +102,9 @@ class Trainer(object):
                  sampling_type="teacher_forcing",
                  scheduled_sampling_decay="exp",
                  scheduled_sampling_k=1.0, scheduled_sampling_c=1.0,
-                 scheduled_sampling_limit=0.0):
+                 scheduled_sampling_limit=0.0,
+                 mixture_type='none',
+                 topk_value=1):
         self.model = model
         self._train_loss = train_loss
         self._valid_loss = valid_loss
@@ -118,6 +124,8 @@ class Trainer(object):
         self._scheduled_sampling_k = scheduled_sampling_k
         self._scheduled_sampling_c = scheduled_sampling_c
         self._scheduled_sampling_limit = scheduled_sampling_limit
+        self._mixture_type = mixture_type
+        self._topk_value = topk_value
 
         assert grad_accum_count == 1  # disable grad accumulation
 
@@ -263,6 +271,7 @@ class Trainer(object):
         tgt_outer = inputters.make_features(batch, 'tgt')
 
         dec_state = None
+        topk_values = None
         for j in range(0, target_size-1, trunc_size):
             # 1. Create truncated target.
             tgt = tgt_outer[j: j + trunc_size]
@@ -288,7 +297,8 @@ class Trainer(object):
                     # returned at each time step
                     dec_out, attns = self.model.decoder(
                         tgt_input, memory_bank,
-                        memory_lengths=lengths)
+                        memory_lengths=lengths,
+                        topk_values=topk_values)
                     out_list.append(dec_out)
 
                     # We flip a coin to decide whether to use teacher forcing
@@ -297,8 +307,14 @@ class Trainer(object):
                     if use_tf:
                         tgt_input = tgt[i].unsqueeze(0)
                     else:
-                        tgt_input = self.model.generator(
-                            dec_out).argmax(dim=2).unsqueeze(2)
+                        if self._mixture_type == 'none':
+                            tgt_input = self.model.generator(
+                                dec_out).argmax(dim=2).unsqueeze(2)
+                        elif self._mixture_type == 'topk_softmax':
+                            # tgt input has shape (len x batch_size x k)
+                            topk_values, tgt_input = \
+                                self.model.generator(dec_out).topk(
+                                    dim=-1, k=self._topk_value)
 
                 outputs = torch.cat(out_list)
 

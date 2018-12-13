@@ -332,10 +332,11 @@ class InputFeedRNNDecoder(RNNDecoderBase):
         if tgt.shape[-1] > 1:
             topk_embs = []
             tgt_topk = tgt.permute(-1, 1, 0)
-            for tgt_k in tgt_topk.split(1):
+            topk_values = torch.softmax(topk_values, dim=-1).permute(-1, 1, 0)
+            for tgt_k, topk_v in zip(tgt_topk.split(1), topk_values.split(1)):
                 emb_k = self.embeddings(tgt_k)
-                topk_embs.append(emb_k)
-            emb = torch.cat(topk_embs, dim=0).mean(dim=0).unsqueeze(0)
+                topk_embs.append(topk_v*emb_k)
+            emb = torch.cat(topk_embs, dim=0).sum(dim=0).unsqueeze(0)
         else:
             emb = self.embeddings(tgt)
 

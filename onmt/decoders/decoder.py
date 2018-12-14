@@ -148,7 +148,8 @@ class RNNDecoderBase(nn.Module):
                                      for _ in self.state["hidden"]])
         self.state["input_feed"] = self.state["input_feed"].detach()
 
-    def forward(self, tgt, memory_bank, memory_lengths=None, step=None):
+    def forward(self, tgt, memory_bank, memory_lengths=None, step=None,
+                topk_values=None):
         """
         Args:
             tgt (`LongTensor`): sequences of padded tokens
@@ -166,7 +167,8 @@ class RNNDecoderBase(nn.Module):
         """
         # Run the forward pass of the RNN.
         dec_state, dec_outs, attns = self._run_forward_pass(
-            tgt, memory_bank, memory_lengths=memory_lengths)
+            tgt, memory_bank, memory_lengths=memory_lengths,
+            topk_values=topk_values)
 
         # Update the state with the result.
         output = dec_outs[-1]
@@ -306,7 +308,8 @@ class InputFeedRNNDecoder(RNNDecoderBase):
           G --> H
     """
 
-    def _run_forward_pass(self, tgt, memory_bank, memory_lengths=None):
+    def _run_forward_pass(self, tgt, memory_bank,
+                          memory_lengths=None, topk_values=None):
         """
         See StdRNNDecoder._run_forward_pass() for description
         of arguments and return values.
@@ -326,7 +329,17 @@ class InputFeedRNNDecoder(RNNDecoderBase):
         if self._coverage:
             attns["coverage"] = []
 
-        emb = self.embeddings(tgt)
+        if tgt.shape[-1] > 1:
+            topk_embs = []
+            tgt_topk = tgt.permute(-1, 1, 0)
+            topk_values = torch.softmax(topk_values, dim=-1).permute(-1, 1, 0)
+            for tgt_k, topk_v in zip(tgt_topk.split(1), topk_values.split(1)):
+                emb_k = self.embeddings(tgt_k)
+                topk_embs.append(topk_v*emb_k)
+            emb = torch.cat(topk_embs, dim=0).sum(dim=0).unsqueeze(0)
+        else:
+            emb = self.embeddings(tgt)
+
         assert emb.dim() == 3  # len x batch x embedding_dim
 
         dec_state = self.state["hidden"]

@@ -333,6 +333,8 @@ class InputFeedRNNDecoder(RNNDecoderBase):
             topk_embs = []
             tgt_topk = tgt.permute(-1, 1, 0)
             topk_values = torch.softmax(topk_values, dim=-1).permute(-1, 1, 0)
+            # bpop: why do we need a for loop? elements can be drawn from
+            # embeddings in batches, right?
             for tgt_k, topk_v in zip(tgt_topk.split(1), topk_values.split(1)):
                 emb_k = self.embeddings(tgt_k)
                 topk_embs.append(topk_v*emb_k)

@@ -125,7 +125,7 @@ class Trainer(object):
         self._scheduled_sampling_c = scheduled_sampling_c
         self._scheduled_sampling_limit = scheduled_sampling_limit
         self._mixture_type = mixture_type
-        self._topk_value = topk_value
+        self._k = topk_value
 
         assert grad_accum_count == 1  # disable grad accumulation
 
@@ -271,7 +271,7 @@ class Trainer(object):
         tgt_outer = inputters.make_features(batch, 'tgt')
 
         dec_state = None
-        topk_values = None
+        emb_weights = None
         for j in range(0, target_size-1, trunc_size):
             # 1. Create truncated target.
             tgt = tgt_outer[j: j + trunc_size]
@@ -279,8 +279,7 @@ class Trainer(object):
             # 2. F-prop all but generator.
             self.model.zero_grad()
             if teacher_forcing_ratio >= 1:
-                outputs, attns = \
-                    self.model(src, tgt, src_lengths)
+                outputs, attns = self.model(src, tgt, src_lengths)
                 # bpop important note: the output layer has not been applied to
                 # these outputs yet, so you can't use the outputs tensor by
                 # itself to get the model's next prediction.
@@ -292,29 +291,26 @@ class Trainer(object):
                 tgt_input = tgt[0].unsqueeze(0)
                 out_list = []
                 for i in range(1, len(tgt)):
-                    # it's not clear to me this is the correct thing to do
-                    # with attns. I'm not sure what differs between the values
-                    # returned at each time step
                     dec_out, attns = self.model.decoder(
                         tgt_input, memory_bank,
                         memory_lengths=lengths,
-                        topk_values=topk_values)
+                        topk_values=emb_weights)
                     out_list.append(dec_out)
 
-                    # We flip a coin to decide whether to use teacher forcing
-                    # at each time step
+                    # flip a coin for teacher forcing
                     use_tf = random.random() < teacher_forcing_ratio
                     if use_tf:
                         tgt_input = tgt[i].unsqueeze(0)
+                    elif self._mixture_type is None:
+                        # plain-old use of the model's own prediction
+                        logits = self.model.generator[0](dec_out)
+                        tgt_input = logits.argmax(dim=2).unsqueeze(2)
                     else:
-                        if self._mixture_type == 'none':
-                            tgt_input = self.model.generator(
-                                dec_out).argmax(dim=2).unsqueeze(2)
-                        elif self._mixture_type == 'topk_softmax':
-                            # tgt input has shape (len x batch_size x k)
-                            topk_values, tgt_input = \
-                                self.model.generator(dec_out).topk(
-                                    dim=-1, k=self._topk_value)
+                        # mixture of target embeddings based on output probs
+                        gen_out = self.model.generator(dec_out)
+                        k = self._k if self._mixture_type == 'topk' \
+                            else gen_out.size(-1)
+                        emb_weights, tgt_input = gen_out.topk(k, dim=-1)
 
                 outputs = torch.cat(out_list)
 

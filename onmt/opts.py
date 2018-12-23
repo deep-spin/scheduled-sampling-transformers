@@ -453,7 +453,7 @@ def train_opts(parser):
               help="""Minimum decay value for scheduled sampling
               with linear decay.""")
     group.add('--mixture_type', '-mixture_type',
-              type=str, default='none', choices=['none', 'topk_softmax'],
+              type=str, default=None, choices=['topk', 'all'],
               help="""Which method to use when the tgt embedding is created
               for non-teacher forcing techniques""")
     group.add('--topk_value', '-topk_value', type=int, default=1,

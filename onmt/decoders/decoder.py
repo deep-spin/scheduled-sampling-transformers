@@ -149,7 +149,7 @@ class RNNDecoderBase(nn.Module):
         self.state["input_feed"] = self.state["input_feed"].detach()
 
     def forward(self, tgt, memory_bank, memory_lengths=None, step=None,
-                topk_values=None):
+                emb_weights=None):
         """
         Args:
             tgt (`LongTensor`): sequences of padded tokens
@@ -168,7 +168,7 @@ class RNNDecoderBase(nn.Module):
         # Run the forward pass of the RNN.
         dec_state, dec_outs, attns = self._run_forward_pass(
             tgt, memory_bank, memory_lengths=memory_lengths,
-            topk_values=topk_values)
+            emb_weights=emb_weights)
 
         # Update the state with the result.
         output = dec_outs[-1]
@@ -309,10 +309,9 @@ class InputFeedRNNDecoder(RNNDecoderBase):
     """
 
     def _run_forward_pass(self, tgt, memory_bank,
-                          memory_lengths=None, topk_values=None):
+                          memory_lengths=None, emb_weights=None):
         """
-        See StdRNNDecoder._run_forward_pass() for description
-        of arguments and return values.
+        if emb_weights is not None, it should be the same size as tgt
         """
         # Additional args check.
         input_feed = self.state["input_feed"].squeeze(0)
@@ -329,16 +328,15 @@ class InputFeedRNNDecoder(RNNDecoderBase):
         if self._coverage:
             attns["coverage"] = []
 
-        if tgt.shape[-1] > 1:
-            topk_embs = []
-            tgt_topk = tgt.permute(-1, 1, 0)
-            topk_values = torch.softmax(topk_values, dim=-1).permute(-1, 1, 0)
-            # bpop: why do we need a for loop? elements can be drawn from
-            # embeddings in batches, right?
-            for tgt_k, topk_v in zip(tgt_topk.split(1), topk_values.split(1)):
-                emb_k = self.embeddings(tgt_k)
-                topk_embs.append(topk_v*emb_k)
-            emb = torch.cat(topk_embs, dim=0).sum(dim=0).unsqueeze(0)
+        if tgt.size(-1) > 1:
+            assert emb_weights.size() == tgt.size()
+
+            # k_embs: batch x k x emb size
+            k_embs = self.embeddings(tgt.transpose(0, 2)).transpose(0, 1)
+            # weights: batch x 1 x k
+            weights = torch.softmax(emb_weights, dim=-1).transpose(0, 1)
+            # emb: 1 x batch x emb size
+            emb = torch.bmm(weights, k_embs).transpose(0, 1)
         else:
             emb = self.embeddings(tgt)
 

@@ -294,7 +294,7 @@ class Trainer(object):
                     dec_out, attns = self.model.decoder(
                         tgt_input, memory_bank,
                         memory_lengths=lengths,
-                        topk_values=emb_weights)
+                        emb_weights=emb_weights)
                     out_list.append(dec_out)
 
                     # flip a coin for teacher forcing

@@ -334,7 +334,7 @@ class InputFeedRNNDecoder(RNNDecoderBase):
             # k_embs: batch x k x emb size
             k_embs = self.embeddings(tgt.transpose(0, 2)).transpose(0, 1)
             # weights: batch x 1 x k
-            weights = torch.softmax(emb_weights, dim=-1).transpose(0, 1)
+            weights = emb_weights.transpose(0, 1)
             # emb: 1 x batch x emb size
             emb = torch.bmm(weights, k_embs).transpose(0, 1)
         else:

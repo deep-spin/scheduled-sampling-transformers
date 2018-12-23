@@ -307,10 +307,19 @@ class Trainer(object):
                         tgt_input = logits.argmax(dim=2).unsqueeze(2)
                     else:
                         # mixture of target embeddings based on output probs
-                        gen_out = self.model.generator(dec_out)
-                        k = self._k if self._mixture_type == 'topk' \
-                            else gen_out.size(-1)
+                        gen_out = torch.exp(self.model.generator(dec_out))
+                        if self._mixture_type == 'topk':
+                            k = self._k
+                        else:
+                            k = (gen_out > 0).sum(-1).max().item()
                         emb_weights, tgt_input = gen_out.topk(k, dim=-1)
+                        if self._mixture_type == 'topk':
+                            # normalize the weights (not necessary for
+                            # the all case because the k will include all the
+                            # probability mass)
+                            # (might be better to do something with softmax,
+                            # bpop is not sure)
+                            emb_weights /= emb_weights.sum(dim=-1).unsqueeze(2)
 
                 outputs = torch.cat(out_list)
 

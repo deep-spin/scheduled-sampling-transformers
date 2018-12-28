@@ -149,7 +149,7 @@ class RNNDecoderBase(nn.Module):
         self.state["input_feed"] = self.state["input_feed"].detach()
 
     def forward(self, tgt, memory_bank, memory_lengths=None, step=None,
-                emb_weights=None):
+                **kwargs):
         """
         Args:
             tgt (`LongTensor`): sequences of padded tokens
@@ -167,8 +167,7 @@ class RNNDecoderBase(nn.Module):
         """
         # Run the forward pass of the RNN.
         dec_state, dec_outs, attns = self._run_forward_pass(
-            tgt, memory_bank, memory_lengths=memory_lengths,
-            emb_weights=emb_weights)
+            tgt, memory_bank, memory_lengths=memory_lengths, **kwargs)
 
         # Update the state with the result.
         output = dec_outs[-1]
@@ -309,7 +308,7 @@ class InputFeedRNNDecoder(RNNDecoderBase):
     """
 
     def _run_forward_pass(self, tgt, memory_bank,
-                          memory_lengths=None, emb_weights=None):
+                          memory_lengths=None, **kwargs):
         """
         if emb_weights is not None, it should be the same size as tgt
         """
@@ -328,15 +327,30 @@ class InputFeedRNNDecoder(RNNDecoderBase):
         if self._coverage:
             attns["coverage"] = []
 
-        if tgt.size(-1) > 1:
-            assert emb_weights.size() == tgt.size()
-
+        if kwargs['top_k_tgt'] is not None:
+            top_k_tgt = kwargs['top_k_tgt']
+            emb_weights = kwargs['emb_weights']
+            assert emb_weights.size() == top_k_tgt.size()
             # k_embs: batch x k x emb size
-            k_embs = self.embeddings(tgt.transpose(0, 2)).transpose(0, 1)
+            k_embs = self.embeddings(top_k_tgt.transpose(0, 2)).transpose(0, 1)
             # weights: batch x 1 x k
             weights = emb_weights.transpose(0, 1)
             # emb: 1 x batch x emb size
             emb = torch.bmm(weights, k_embs).transpose(0, 1)
+
+            if (kwargs['mixture_type'] is not None and
+                    'tf_mean_mix' in kwargs['mixture_type']):
+
+                # tf_mix_weights: batch x 1 x k
+                tf_mix_weights = torch.ones(tgt_batch, 1, 2)
+                tf_mix_weights /= tf_mix_weights.sum(dim=-1).unsqueeze(2)
+
+                tf_emb = self.embeddings(tgt)
+
+                # emb_concat: batch x k x emb size
+                emb_concat = torch.cat([tf_emb, emb], dim=0).transpose(0, 1)
+
+                emb = torch.bmm(tf_mix_weights, emb_concat).transpose(0, 1)
         else:
             emb = self.embeddings(tgt)
 

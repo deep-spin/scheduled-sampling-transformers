@@ -272,6 +272,7 @@ class Trainer(object):
 
         dec_state = None
         emb_weights = None
+        top_k_tgt = None
         for j in range(0, target_size-1, trunc_size):
             # 1. Create truncated target.
             tgt = tgt_outer[j: j + trunc_size]
@@ -294,7 +295,9 @@ class Trainer(object):
                     dec_out, attns = self.model.decoder(
                         tgt_input, memory_bank,
                         memory_lengths=lengths,
-                        emb_weights=emb_weights)
+                        top_k_tgt=top_k_tgt,
+                        emb_weights=emb_weights,
+                        mixture_type=self._mixture_type)
                     out_list.append(dec_out)
 
                     # flip a coin for teacher forcing
@@ -308,12 +311,15 @@ class Trainer(object):
                     else:
                         # mixture of target embeddings based on output probs
                         gen_out = torch.exp(self.model.generator(dec_out))
-                        if self._mixture_type == 'topk':
+                        if 'topk' in self._mixture_type:
                             k = self._k
                         else:
+                            # getting the k for the sparsemax case,
+                            # where k is chosen accordding to the number of
+                            # nonzero elements.
                             k = (gen_out > 0).sum(-1).max().item()
-                        emb_weights, tgt_input = gen_out.topk(k, dim=-1)
-                        if self._mixture_type == 'topk':
+                        emb_weights, top_k_tgt = gen_out.topk(k, dim=-1)
+                        if 'topk' in self._mixture_type:
                             # normalize the weights (not necessary for
                             # the all case because the k will include all the
                             # probability mass)

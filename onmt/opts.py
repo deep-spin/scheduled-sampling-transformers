@@ -458,6 +458,12 @@ def train_opts(parser):
               for non-teacher forcing techniques""")
     group.add('--topk_value', '-topk_value', type=int, default=1,
               help="""K value for mixture of input tgt embeddings""")
+    group.add('--peeling_back', '-peeling_back', type=str, default=None,
+              choices=['strict'],
+              help="""Type of peeling back the teacher forcing to the 
+              end of the sequence. Strict=the specified of teacher forcing ratio
+              defines the part of the sequnce which uses teacher forcing,
+              the rest of the sequence uses the model predictions.""")
 
     # learning rate
     group = parser.add_argument_group('Optimization- Rate')

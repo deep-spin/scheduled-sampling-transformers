@@ -327,7 +327,7 @@ class InputFeedRNNDecoder(RNNDecoderBase):
         if self._coverage:
             attns["coverage"] = []
 
-        if kwargs['top_k_tgt'] is not None:
+        if 'top_k_tgt' in kwargs.keys() and kwargs['top_k_tgt'] is not None:
             top_k_tgt = kwargs['top_k_tgt']
             emb_weights = kwargs['emb_weights']
             assert emb_weights.size() == top_k_tgt.size()

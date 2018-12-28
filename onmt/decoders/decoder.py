@@ -341,13 +341,13 @@ class InputFeedRNNDecoder(RNNDecoderBase):
             if (kwargs['mixture_type'] is not None and
                     'tf_mean_mix' in kwargs['mixture_type']):
 
-                # tf_mix_weights: batch x 1 x k
-                tf_mix_weights = torch.ones(tgt_batch, 1, 2)
+                # tf_mix_weights: batch x 1 x 2
+                tf_mix_weights = weights.new_ones(tgt_batch, 1, 2)
                 tf_mix_weights /= tf_mix_weights.sum(dim=-1).unsqueeze(2)
 
                 tf_emb = self.embeddings(tgt)
 
-                # emb_concat: batch x k x emb size
+                # emb_concat: batch x 2 x emb size
                 emb_concat = torch.cat([tf_emb, emb], dim=0).transpose(0, 1)
 
                 emb = torch.bmm(tf_mix_weights, emb_concat).transpose(0, 1)

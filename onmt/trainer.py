@@ -304,6 +304,8 @@ class Trainer(object):
                     use_tf = random.random() < teacher_forcing_ratio
                     if use_tf:
                         tgt_input = tgt[i].unsqueeze(0)
+                        emb_weights = None
+                        top_k_tgt = None
                     elif self._mixture_type is None:
                         # plain-old use of the model's own prediction
                         logits = self.model.generator[0](dec_out)

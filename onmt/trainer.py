@@ -306,10 +306,10 @@ class Trainer(object):
 
                     # define whether the teacher forcing depends on the position
                     # in the sequence
-                    if peeling_back == 'strict':
+                    if self._peeling_back == 'strict':
                         # strick peeling back means that the given teacher forcing ratio
                         # defines the part of the sequence that uses teacher forcing
-                        use_tf = float(j)/target_size < teacher_forcing_ratio:
+                        use_tf = float(j)/target_size < teacher_forcing_ratio
 
                     if use_tf:
                         tgt_input = tgt[i].unsqueeze(0)

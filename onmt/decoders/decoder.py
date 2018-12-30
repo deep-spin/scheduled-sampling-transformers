@@ -338,19 +338,36 @@ class InputFeedRNNDecoder(RNNDecoderBase):
             # emb: 1 x batch x emb size
             emb = torch.bmm(weights, k_embs).transpose(0, 1)
 
-            if (kwargs['mixture_type'] is not None and
-                    'tf_mean_mix' in kwargs['mixture_type']):
+            if kwargs['mixture_type'] is not None:
+                if 'tf_mean_mix' in kwargs['mixture_type']:
 
-                # tf_mix_weights: batch x 1 x 2
-                tf_mix_weights = weights.new_ones(tgt_batch, 1, 2)
-                tf_mix_weights /= tf_mix_weights.sum(dim=-1).unsqueeze(2)
+                    # tf_mix_weights: batch x 1 x 2
+                    tf_mix_weights = weights.new_ones(tgt_batch, 1, 2)
+                    tf_mix_weights /= tf_mix_weights.sum(dim=-1).unsqueeze(2)
 
-                tf_emb = self.embeddings(tgt)
+                    tf_emb = self.embeddings(tgt)
 
-                # emb_concat: batch x 2 x emb size
-                emb_concat = torch.cat([tf_emb, emb], dim=0).transpose(0, 1)
+                    # emb_concat: batch x 2 x emb size
+                    emb_concat = \
+                        torch.cat([tf_emb, emb], dim=0).transpose(0, 1)
 
-                emb = torch.bmm(tf_mix_weights, emb_concat).transpose(0, 1)
+                    emb = torch.bmm(tf_mix_weights, emb_concat).transpose(0, 1)
+
+                elif 'teacher_suggesting' in kwargs['mixture_type']:
+
+                    # examples in batch that need teacher
+                    where_to_suggest = top_k_tgt.ne(tgt).any(-1, keepdim=True)
+                    # ^1 negates a ByteTensor
+                    no_need_suggesting = where_to_suggest ^ 1
+
+                    where_to_suggest = where_to_suggest.type_as(emb)
+                    no_need_suggesting = no_need_suggesting.type_as(emb)
+
+                    tf_emb = self.embeddings(tgt)
+
+                    emb = \
+                        tf_emb * where_to_suggest + \
+                        emb * no_need_suggesting
         else:
             emb = self.embeddings(tgt)
 

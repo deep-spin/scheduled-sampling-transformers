@@ -311,6 +311,7 @@ class Trainer(object):
                         logits = self.model.generator[0](dec_out)
                         tgt_input = logits.argmax(dim=2).unsqueeze(2)
                     else:
+                        tgt_input = tgt[i].unsqueeze(0)
                         # mixture of target embeddings based on output probs
                         gen_out = torch.exp(self.model.generator(dec_out))
                         if 'topk' in self._mixture_type:

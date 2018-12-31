@@ -339,13 +339,14 @@ class InputFeedRNNDecoder(RNNDecoderBase):
             emb = torch.bmm(weights, k_embs).transpose(0, 1)
 
             if kwargs['mixture_type'] is not None:
+
+                tf_emb = self.embeddings(tgt)
+
                 if 'tf_mean_mix' in kwargs['mixture_type']:
 
                     # tf_mix_weights: batch x 1 x 2
                     tf_mix_weights = weights.new_ones(tgt_batch, 1, 2)
                     tf_mix_weights /= tf_mix_weights.sum(dim=-1).unsqueeze(2)
-
-                    tf_emb = self.embeddings(tgt)
 
                     # emb_concat: batch x 2 x emb size
                     emb_concat = \
@@ -363,11 +364,13 @@ class InputFeedRNNDecoder(RNNDecoderBase):
                     where_to_suggest = where_to_suggest.type_as(emb)
                     no_need_suggesting = no_need_suggesting.type_as(emb)
 
-                    tf_emb = self.embeddings(tgt)
-
                     emb = \
                         tf_emb * where_to_suggest + \
                         emb * no_need_suggesting
+
+                elif 'tf_gate' in kwargs['mixture_type']:
+                    gate_value = kwargs['tf_gate_value']
+                    emb = tf_emb * gate_value + emb * (1 - gate_value)
         else:
             emb = self.embeddings(tgt)
 

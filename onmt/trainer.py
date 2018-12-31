@@ -273,6 +273,8 @@ class Trainer(object):
         dec_state = None
         emb_weights = None
         top_k_tgt = None
+        tf_gate_value = None
+
         for j in range(0, target_size-1, trunc_size):
             # 1. Create truncated target.
             tgt = tgt_outer[j: j + trunc_size]
@@ -297,7 +299,9 @@ class Trainer(object):
                         memory_lengths=lengths,
                         top_k_tgt=top_k_tgt,
                         emb_weights=emb_weights,
-                        mixture_type=self._mixture_type)
+                        mixture_type=self._mixture_type,
+                        tf_gate_value=tf_gate_value,
+                        tf_ratio=teacher_forcing_ratio)
                     out_list.append(dec_out)
 
                     # flip a coin for teacher forcing
@@ -329,6 +333,9 @@ class Trainer(object):
                             # (might be better to do something with softmax,
                             # bpop is not sure)
                             emb_weights /= emb_weights.sum(dim=-1).unsqueeze(2)
+
+                        if 'tf_gate' in self._mixture_type:
+                            tf_gate_value = self.model.tf_gate(gen_out)
 
                 outputs = torch.cat(out_list)
 

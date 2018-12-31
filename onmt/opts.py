@@ -456,7 +456,8 @@ def train_opts(parser):
               type=str, default=None,
               choices=['topk', 'all',
                        'topk_tf_mean_mix', 'all_tf_mean_mix',
-                       'topk_teacher_suggesting', 'all_teacher_suggesting'],
+                       'topk_teacher_suggesting', 'all_teacher_suggesting',
+                       'topk_tf_gate', 'all_tf_gate'],
               help="""Which method to use when the tgt embedding is created
               for non-teacher forcing techniques""")
     group.add('--topk_value', '-topk_value', type=int, default=1,

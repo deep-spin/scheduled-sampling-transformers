@@ -53,6 +53,7 @@ def build_trainer(opt, device_id, model, fields,
     scheduled_sampling_limit = opt.scheduled_sampling_limit
     mixture_type = opt.mixture_type
     topk_value = opt.topk_value
+    peeling_back = opt.peeling_back
 
     report_manager = onmt.utils.build_report_manager(opt)
     trainer = onmt.Trainer(model, train_loss, valid_loss, optim, trunc_size,
@@ -66,7 +67,8 @@ def build_trainer(opt, device_id, model, fields,
                            scheduled_sampling_c=scheduled_sampling_c,
                            scheduled_sampling_limit=scheduled_sampling_limit,
                            mixture_type=mixture_type,
-                           topk_value=topk_value)
+                           topk_value=topk_value,
+                           peeling_back=peeling_back)
     return trainer
 
 
@@ -104,7 +106,8 @@ class Trainer(object):
                  scheduled_sampling_k=1.0, scheduled_sampling_c=1.0,
                  scheduled_sampling_limit=0.0,
                  mixture_type='none',
-                 topk_value=1):
+                 topk_value=1,
+                 peeling_back='none'):
         self.model = model
         self._train_loss = train_loss
         self._valid_loss = valid_loss
@@ -126,6 +129,7 @@ class Trainer(object):
         self._scheduled_sampling_limit = scheduled_sampling_limit
         self._mixture_type = mixture_type
         self._k = topk_value
+        self._peeling_back = peeling_back
 
         assert grad_accum_count == 1  # disable grad accumulation
 
@@ -306,6 +310,14 @@ class Trainer(object):
 
                     # flip a coin for teacher forcing
                     use_tf = random.random() < teacher_forcing_ratio
+
+                    # define whether the teacher forcing depends on the position
+                    # in the sequence
+                    if self._peeling_back == 'strict':
+                        # strick peeling back means that the given teacher forcing ratio
+                        # defines the part of the sequence that uses teacher forcing
+                        use_tf = float(j)/target_size < teacher_forcing_ratio
+
                     if use_tf:
                         tgt_input = tgt[i].unsqueeze(0)
                         emb_weights = None

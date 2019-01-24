@@ -8,9 +8,6 @@ import unittest
 import glob
 import os
 import codecs
-from collections import Counter
-
-import torchtext
 
 import onmt
 import onmt.inputters
@@ -64,18 +61,6 @@ class TestData(unittest.TestCase):
         if hasattr(opt, 'tgt_vocab') and os.path.exists(opt.tgt_vocab):
             os.remove(opt.tgt_vocab)
 
-    def test_merge_vocab(self):
-        va = torchtext.vocab.Vocab(Counter('abbccc'))
-        vb = torchtext.vocab.Vocab(Counter('eeabbcccf'))
-
-        merged = onmt.inputters.merge_vocabs([va, vb], 2)
-
-        self.assertEqual(Counter({'c': 6, 'b': 4, 'a': 2, 'e': 2, 'f': 1}),
-                         merged.freqs)
-        # 4 specicials + 2 words (since we pass 2 to merge_vocabs)
-        self.assertEqual(6, len(merged.itos))
-        self.assertTrue('b' in merged.itos)
-
 
 def _add_test(param_setting, methodname):
     """
@@ -108,12 +93,12 @@ test_databuild = [[],
                    ('tgt_vocab_size', 1)],
                   [('src_vocab_size', 10000),
                    ('tgt_vocab_size', 10000)],
-                  [('src_seq_length', 1)],
-                  [('src_seq_length', 5000)],
+                  [('src_seq_len', 1)],
+                  [('src_seq_len', 5000)],
                   [('src_seq_length_trunc', 1)],
                   [('src_seq_length_trunc', 5000)],
-                  [('tgt_seq_length', 1)],
-                  [('tgt_seq_length', 5000)],
+                  [('tgt_seq_len', 1)],
+                  [('tgt_seq_len', 5000)],
                   [('tgt_seq_length_trunc', 1)],
                   [('tgt_seq_length_trunc', 5000)],
                   [('shuffle', 0)],
@@ -135,8 +120,8 @@ for p in test_databuild:
 test_databuild = [[],
                   [('tgt_vocab_size', 1)],
                   [('tgt_vocab_size', 10000)],
-                  [('tgt_seq_length', 1)],
-                  [('tgt_seq_length', 5000)],
+                  [('tgt_seq_len', 1)],
+                  [('tgt_seq_len', 5000)],
                   [('tgt_seq_length_trunc', 1)],
                   [('tgt_seq_length_trunc', 5000)],
                   [('shuffle', 0)],
@@ -159,12 +144,12 @@ for p in test_databuild:
 test_databuild = [[],
                   [('tgt_vocab_size', 1)],
                   [('tgt_vocab_size', 10000)],
-                  [('src_seq_length', 1)],
-                  [('src_seq_length', 5000)],
+                  [('src_seq_len', 1)],
+                  [('src_seq_len', 5000)],
                   [('src_seq_length_trunc', 3200)],
                   [('src_seq_length_trunc', 5000)],
-                  [('tgt_seq_length', 1)],
-                  [('tgt_seq_length', 5000)],
+                  [('tgt_seq_len', 1)],
+                  [('tgt_seq_len', 5000)],
                   [('tgt_seq_length_trunc', 1)],
                   [('tgt_seq_length_trunc', 5000)],
                   [('shuffle', 0)],

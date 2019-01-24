@@ -14,7 +14,7 @@ import math
 import torch
 import onmt.inputters as inputters
 import onmt.utils
-from onmt.utils import Statistics, loss
+from onmt.utils import Statistics
 from onmt.utils.distributed import all_gather_list, \
     all_reduce_and_rescale_tensors
 from onmt.utils.logging import logger
@@ -35,9 +35,10 @@ def build_trainer(opt, device_id, model, fields,
         model_saver(:obj:`onmt.models.ModelSaverBase`): the utility object
             used to save the model
     """
-    train_loss = loss.build_loss_compute(model, fields["tgt"].vocab, opt)
-    valid_loss = loss.build_loss_compute(model, fields["tgt"].vocab, opt,
-                                         train=False)
+    train_loss = onmt.utils.loss.build_loss_compute(
+        model, fields["tgt"], opt)
+    valid_loss = onmt.utils.loss.build_loss_compute(
+        model, fields["tgt"], opt, train=False)
 
     trunc_size = opt.truncated_decoder
     shard_size = opt.max_generator_batches
@@ -135,7 +136,7 @@ class Trainer(object):
 
         self.model.train()
 
-    def train(self, train_iter_fct, valid_iter_fct, train_steps, valid_steps):
+    def train(self, train_iter, valid_iter, train_steps, valid_steps):
         """
         The main training loops.
         by iterating over training data (i.e. `train_iter_fct`)
@@ -152,8 +153,10 @@ class Trainer(object):
         """
         logger.info('Start training...')
 
-        step = self.optim._step + 1  # this is dumb
-        train_iter = train_iter_fct()
+        step = self.optim._step + 1
+        true_batchs = []
+        accum = 0
+        normalization = 0
 
         total_stats = Statistics()
         report_stats = Statistics()
@@ -163,41 +166,60 @@ class Trainer(object):
 
             # there should be only one loop
             for i, batch in enumerate(train_iter):
-                if self.n_gpu != 0 and i % self.n_gpu != self.gpu_rank:
-                    continue
+                if self.n_gpu == 0 or (i % self.n_gpu == self.gpu_rank):
+                    if self.gpu_verbose_level > 1:
+                        logger.info("GpuRank %d: index: %d accum: %d"
+                                    % (self.gpu_rank, i, accum))
 
-                norm = self._norm(batch)
+                    true_batchs.append(batch)
 
-                batch_teacher_forcing_ratio = \
-                    self._calc_teacher_forcing_ratio(step)
-                self._train_batch(
-                    batch, norm, total_stats, report_stats,
-                    batch_teacher_forcing_ratio
-                )
+                    if self.norm_method == "tokens":
+                        num_tokens = batch.tgt[1:].ne(
+                            self.train_loss.padding_idx).sum()
+                        normalization += num_tokens.item()
+                    else:
+                        normalization += batch.batch_size
+                    accum += 1
+                    if accum == self.grad_accum_count:
 
-                report_stats = self._maybe_report_training(
-                    step, train_steps,
-                    self.optim.learning_rate,
-                    report_stats)
+                        batch_teacher_forcing_ratio = \
+                            self._calc_teacher_forcing_ratio(step)
+                        self._train_batch(
+                            batch, normalization, total_stats, report_stats,
+                            batch_teacher_forcing_ratio
+                        )
 
-                if step % valid_steps == 0:
-                    valid_iter = valid_iter_fct()
-                    valid_stats = self.validate(valid_iter)
+                        report_stats = self._maybe_report_training(
+                            step, train_steps,
+                            self.optim.learning_rate,
+                            report_stats)
 
-                    valid_stats = self._maybe_gather_stats(valid_stats)
+                        true_batchs = []
+                        accum = 0
+                        normalization = 0
+                        if (step % valid_steps == 0):
+                            if self.gpu_verbose_level > 0:
+                                logger.info('GpuRank %d: validate step %d'
+                                            % (self.gpu_rank, step))
+                            valid_stats = self.validate(valid_iter)
+                            if self.gpu_verbose_level > 0:
+                                logger.info('GpuRank %d: gather valid stat \
+                                            step %d' % (self.gpu_rank, step))
+                            valid_stats = self._maybe_gather_stats(valid_stats)
+                            if self.gpu_verbose_level > 0:
+                                logger.info('GpuRank %d: report stat step %d'
+                                            % (self.gpu_rank, step))
+                            self._report_step(self.optim.learning_rate,
+                                              step, valid_stats=valid_stats)
 
-                    self._report_step(self.optim.learning_rate,
-                                      step, valid_stats=valid_stats)
-
-                if self.gpu_rank == 0:
-                    self._maybe_save(step)
-                # ideally come up with sane looping conditions so it's
-                # easier to do things like a variable teacher forcing
-                # schedule
-                step += 1
-                if step > train_steps:
-                    break
-            train_iter = train_iter_fct()
+                        if self.gpu_rank == 0:
+                            self._maybe_save(step)
+                        step += 1
+                        if step > train_steps:
+                            break
+            if self.gpu_verbose_level > 0:
+                logger.info('GpuRank %d: we completed an epoch \
+                            at step %d' % (self.gpu_rank, step))
 
         return total_stats
 
@@ -210,9 +232,9 @@ class Trainer(object):
         # Set model in validating mode.
         self.model.eval()
 
-        stats = Statistics()
-
         with torch.no_grad():
+            stats = onmt.utils.Statistics()
+
             for batch in valid_iter:
                 src = inputters.make_features(batch, 'src', self.data_type)
                 if self.data_type == 'text':
@@ -228,7 +250,7 @@ class Trainer(object):
                 outputs, attns = self.model(src, tgt, src_lengths)
 
                 # Compute loss.
-                batch_stats = self._valid_loss.monolithic_compute_loss(
+                batch_stats = self.valid_loss.monolithic_compute_loss(
                     batch, outputs, attns)
 
                 # Update statistics.
@@ -311,11 +333,14 @@ class Trainer(object):
                     # flip a coin for teacher forcing
                     use_tf = random.random() < teacher_forcing_ratio
 
-                    # define whether the teacher forcing depends on the position
+                    # define whether the teacher forcing
+                    # depends on the position
                     # in the sequence
                     if self._peeling_back == 'strict':
-                        # strick peeling back means that the given teacher forcing ratio
-                        # defines the part of the sequence that uses teacher forcing
+                        # strick peeling back means that the given teacher
+                        # forcing ratio
+                        # defines the part of the sequence that uses
+                        # teacher forcing
                         use_tf = float(j)/target_size < teacher_forcing_ratio
 
                     if use_tf:

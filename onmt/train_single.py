@@ -6,13 +6,14 @@
 import configargparse
 
 import os
+import glob
 import random
 import torch
 
 import onmt.opts as opts
 
-from onmt.inputters.inputter import build_dataset_iter, lazily_load_dataset, \
-    _load_fields, _collect_report_features
+from onmt.inputters.inputter import build_dataset_iter, \
+    load_fields, _collect_report_features
 from onmt.model_builder import build_model
 from onmt.utils.optimizers import build_optim
 from onmt.trainer import build_trainer
@@ -51,14 +52,17 @@ def training_opt_postprocessing(opt, device_id):
     if opt.rnn_size != -1:
         opt.enc_rnn_size = opt.rnn_size
         opt.dec_rnn_size = opt.rnn_size
-        if opt.model_type == 'text' and opt.enc_rnn_size != opt.dec_rnn_size:
-            raise AssertionError("""We do not support different encoder and
-                                 decoder rnn sizes for translation now.""")
 
-    opt.brnn = (opt.encoder_type == "brnn")
+        # this check is here because audio allows the encoder and decoder to
+        # be different sizes, but other model types do not yet
+        same_size = opt.enc_rnn_size == opt.dec_rnn_size
+        assert opt.model_type == 'audio' or same_size, \
+            "The encoder and decoder rnns must be the same size for now"
 
-    if opt.rnn_type == "SRU" and not opt.gpu_ranks:
-        raise AssertionError("Using SRU requires -gpu_ranks set.")
+    opt.brnn = opt.encoder_type == "brnn"
+
+    assert opt.rnn_type != "SRU" or opt.gpu_ranks, \
+        "Using SRU requires -gpu_ranks set."
 
     if torch.cuda.is_available() and not opt.gpu_ranks:
         logger.info("WARNING: You have a CUDA device, \
@@ -104,13 +108,14 @@ def main(opt, device_id):
         checkpoint = None
         model_opt = opt
 
-    # Peek the first dataset to determine the data_type.
+    # Load a shard dataset to determine the data_type.
     # (All datasets have the same data_type).
-    first_dataset = next(lazily_load_dataset("train", opt))
+    # this should be refactored out of existence reasonably soon
+    first_dataset = torch.load(glob.glob(opt.data + '.train*.pt')[0])
     data_type = first_dataset.data_type
 
     # Load fields generated from preprocess phase.
-    fields = _load_fields(first_dataset, data_type, opt, checkpoint)
+    fields = load_fields(first_dataset, opt, checkpoint)
 
     # Report src/tgt features.
 
@@ -139,19 +144,14 @@ def main(opt, device_id):
     trainer = build_trainer(opt, device_id, model, fields,
                             optim, data_type, model_saver=model_saver)
 
-    def train_iter_fct(): return build_dataset_iter(
-        lazily_load_dataset("train", opt), fields, opt)
+    train_iter = build_dataset_iter("train", fields, opt)
+    valid_iter = build_dataset_iter("valid", fields, opt, is_train=False)
 
-    def valid_iter_fct(): return build_dataset_iter(
-        lazily_load_dataset("valid", opt), fields, opt, is_train=False)
-
-    # Do training.
     if len(opt.gpu_ranks):
         logger.info('Starting training on GPU: %s' % opt.gpu_ranks)
     else:
         logger.info('Starting training on CPU, could be very slow')
-    trainer.train(train_iter_fct, valid_iter_fct, opt.train_steps,
-                  opt.valid_steps)
+    trainer.train(train_iter, valid_iter, opt.train_steps, opt.valid_steps)
 
     if opt.tensorboard:
         trainer.report_manager.tensorboard_writer.close()

@@ -250,7 +250,7 @@ class Trainer(object):
                 outputs, attns = self.model(src, tgt, src_lengths)
 
                 # Compute loss.
-                batch_stats = self.valid_loss.monolithic_compute_loss(
+                batch_stats = self._valid_loss.monolithic_compute_loss(
                     batch, outputs, attns)
 
                 # Update statistics.

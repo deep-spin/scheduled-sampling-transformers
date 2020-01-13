@@ -190,7 +190,7 @@ class TransformerDecoder(nn.Module):
     def detach_state(self):
         self.state["src"] = self.state["src"].detach()
 
-    def forward(self, tgt, memory_bank, memory_lengths=None, step=None):
+    def forward(self, tgt, memory_bank, memory_lengths=None, step=None, **kwargs):
         """
         See :obj:`onmt.modules.RNNDecoderBase.forward()`
         """
@@ -210,7 +210,13 @@ class TransformerDecoder(nn.Module):
             attns["copy"] = []
 
         # Run the forward pass of the TransformerDecoder.
-        emb = self.embeddings(tgt, step=step)
+        # If the pre-computed target embeddings were passed in kwargs, 
+        # use them instead of the target sequence embeddings.
+        if 'tf_emb' in kwargs.keys() and kwargs['tf_emb'] is not None:
+            emb = kwargs['tf_emb']
+        else:
+            emb = self.embeddings(tgt, step=step)
+
         assert emb.dim() == 3  # len x batch x embedding_dim
 
         output = emb.transpose(0, 1).contiguous()
@@ -242,6 +248,8 @@ class TransformerDecoder(nn.Module):
             attns["copy"] = attn
 
         # TODO change the way attns is returned dict => list or tuple (onnx)
+        # print('the output from the transformer decoder: ', len(dec_outs), len(attns))
+
         return dec_outs, attns
 
     def _init_cache(self, memory_bank, num_layers, self_attn_type):

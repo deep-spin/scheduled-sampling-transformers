@@ -21,6 +21,7 @@ class Elementwise(nn.ModuleList):
         super(Elementwise, self).__init__(*args)
 
     def forward(self, inputs):
+        # print('inputs_', len(self), len(inputs), inputs.shape)
         inputs_ = [feat.squeeze(2) for feat in inputs.split(1, dim=2)]
         assert len(self) == len(inputs_)
         outputs = [f(x) for f, x in zip(self, inputs_)]

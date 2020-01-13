@@ -19,6 +19,8 @@ from onmt.utils.distributed import all_gather_list, \
     all_reduce_and_rescale_tensors
 from onmt.utils.logging import logger
 
+import onmt.modules, onmt.modules.softmax_extended
+
 
 def build_trainer(opt, device_id, model, fields,
                   optim, data_type, model_saver=None):
@@ -55,6 +57,11 @@ def build_trainer(opt, device_id, model, fields,
     mixture_type = opt.mixture_type
     topk_value = opt.topk_value
     peeling_back = opt.peeling_back
+    twopass = opt.decoder_type == 'transformer'
+    passone_nograd = (not opt.transformer_passone) or \
+                    (opt.transformer_passone and opt.transformer_passone == 'nograd')
+    scheduled_activation = opt.transformer_scheduled_activation
+    scheduled_softmax_alpha = opt.transformer_scheduled_alpha
 
     report_manager = onmt.utils.build_report_manager(opt)
     trainer = onmt.Trainer(model, train_loss, valid_loss, optim, trunc_size,
@@ -69,7 +76,11 @@ def build_trainer(opt, device_id, model, fields,
                            scheduled_sampling_limit=scheduled_sampling_limit,
                            mixture_type=mixture_type,
                            topk_value=topk_value,
-                           peeling_back=peeling_back)
+                           peeling_back=peeling_back,
+                           twopass=twopass,
+                           passone_nograd=passone_nograd,
+                           scheduled_activation=scheduled_activation,
+                           scheduled_softmax_alpha=scheduled_softmax_alpha)
     return trainer
 
 
@@ -108,7 +119,11 @@ class Trainer(object):
                  scheduled_sampling_limit=0.0,
                  mixture_type='none',
                  topk_value=1,
-                 peeling_back='none'):
+                 peeling_back='none',
+                 twopass=False,
+                 passone_nograd='nograd',
+                 scheduled_activation='softmax',
+                 scheduled_softmax_alpha='1.0'):
         self.model = model
         self._train_loss = train_loss
         self._valid_loss = valid_loss
@@ -131,6 +146,16 @@ class Trainer(object):
         self._mixture_type = mixture_type
         self._k = topk_value
         self._peeling_back = peeling_back
+        self._twopass = twopass
+        self._passone_nograd = passone_nograd
+        if scheduled_activation == "sparsemax":
+            self._scheduled_activation_function = onmt.modules.sparse_activations.Sparsemax(dim=-1)
+        elif scheduled_activation == "gumbel":
+            self._scheduled_activation_function = onmt.modules.softmax_extended.GumbelSoftmax(dim=-1, alpha=scheduled_softmax_alpha)
+        elif scheduled_activation == "softmax_temp":
+            self._scheduled_activation_function = onmt.modules.softmax_extended.SoftmaxWithTemperature(dim=-1, alpha=scheduled_softmax_alpha)
+        else:
+            self._scheduled_activation_function = torch.nn.Softmax(dim=-1)
 
         assert grad_accum_count == 1  # disable grad accumulation
 
@@ -184,9 +209,12 @@ class Trainer(object):
 
                         batch_teacher_forcing_ratio = \
                             self._calc_teacher_forcing_ratio(step)
+
+                        # print('TRANSF_GRAD: step: ', step)
+
                         self._train_batch(
                             batch, normalization, total_stats, report_stats,
-                            batch_teacher_forcing_ratio
+                            batch_teacher_forcing_ratio, step
                         )
 
                         report_stats = self._maybe_report_training(
@@ -248,7 +276,7 @@ class Trainer(object):
 
                 # F-prop through the model.
                 outputs, attns = self.model(src, tgt, src_lengths)
-
+ 
                 # Compute loss.
                 batch_stats = self._valid_loss.monolithic_compute_loss(
                     batch, outputs, attns)
@@ -266,22 +294,25 @@ class Trainer(object):
             return 1.0
         elif self._sampling_type == "scheduled":  # scheduled sampling
             if self._scheduled_sampling_decay == "exp":
-                return self._scheduled_sampling_k ** step
+                scheduled_ratio = self._scheduled_sampling_k ** step
             elif self._scheduled_sampling_decay == "sigmoid":
-                return self._scheduled_sampling_k / (
+                if step / self._scheduled_sampling_k > 700:
+                    scheduled_ratio = 0
+                else:
+                    scheduled_ratio = self._scheduled_sampling_k / (
                             self._scheduled_sampling_k
                             + math.exp(step / self._scheduled_sampling_k)
                             )
-            else:  # linear
-                return max(
-                    self._scheduled_sampling_limit,
-                    self._scheduled_sampling_k -
-                    self._scheduled_sampling_c * step)
+            else:  # linear 
+                scheduled_ratio = self._scheduled_sampling_k - \
+                                    self._scheduled_sampling_c * step
+            scheduled_ratio = max(self._scheduled_sampling_limit, scheduled_ratio)
+            return scheduled_ratio
         else:  # always sample from the model predictions
             return 0.0
 
     def _train_batch(self, batch, normalization, total_stats, report_stats,
-                     teacher_forcing_ratio):
+                     teacher_forcing_ratio,step=None):
         target_size = batch.tgt.size(0)
         trunc_size = self.trunc_size if self.trunc_size else target_size
 
@@ -312,7 +343,91 @@ class Trainer(object):
                 # bpop important note: the output layer has not been applied to
                 # these outputs yet, so you can't use the outputs tensor by
                 # itself to get the model's next prediction.
+            elif self._twopass:
+                tf_tgt_section = round(target_size*teacher_forcing_ratio)
+                if tf_tgt_section >= target_size:
+                    # The standard model
+                    outputs, attns = self.model(src, tgt, src_lengths)
+                else:
+                    tgt = tgt[:-1]
+
+                    # 1. Go through the encoder
+                    enc_state, memory_bank, lengths = \
+                            self.model.encoder(src, src_lengths)
+                    self.model.decoder.init_state(src, memory_bank, enc_state)
+
+                    # This part can be with grad or no_grad
+                    if self._passone_nograd:
+                        with torch.no_grad():
+                            outputs, attns = self.model.decoder(tgt, memory_bank,
+                                            memory_lengths=lengths)
+                            logits = self.model.generator[0](outputs)
+
+                    else:
+                        outputs, attns = self.model.decoder(tgt, memory_bank,
+                                            memory_lengths=lengths)                        
+
+                        logits = self.model.generator[0](outputs)
+
+                    # 2. Get the embeddings from the model predictions
+                    if self._mixture_type and 'topk' in self._mixture_type:
+                        k = self._k
+                        emb_weights, top_k_tgt = logits.topk(k, dim=-1)
+
+                        # Needed for getting the embeddings
+                        top_k_tgt = top_k_tgt.unsqueeze(-2)
+
+                        # k_embs: batch x k x emb size
+                        k_embs = self.model.decoder.embeddings(top_k_tgt,step=0).transpose(2,3) 
+                        # weights: batch x sequence length x k x 1
+                        # Normalize the weights
+                        emb_weights /= emb_weights.sum(dim=-1).unsqueeze(2)
+                        weights = emb_weights.unsqueeze(3) 
+                        emb_size = k_embs.shape[2]
+                        embeddings = self.model.decoder.embeddings(top_k_tgt,step=0)
+                        model_prediction_emb = torch.bmm(k_embs.view(-1, emb_size, k), weights.view(-1, k, 1)) #.transpose(0, 1)
+                        model_prediction_emb = model_prediction_emb.view(batch.batch_size, -1, emb_size).transpose(0,1)
+                    elif self._mixture_type and 'all' in self._mixture_type:
+                        logits = self._scheduled_activation_function(logits)
+
+                        # weights = logits
+                        # Get the indices of all words in the vocabulary
+                        ind = torch.cuda.LongTensor([i for i in range(logits.shape[2])])
+                        # We need this format of the indices to ge tht embeddings from the decoder
+                        ind = ind.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                        embeddings = self.model.decoder.embeddings(ind,step=0)[0][0]
+
+                        # The predicted embedding is the weighted sum of the words in the vocabulary
+                        model_prediction_emb = torch.matmul(logits, embeddings)
+                    else:
+                        # Just get the argmax from the model predictions
+                        logits = self.model.generator[1](logits)
+                        model_predictions = logits.argmax(dim=2).unsqueeze(2)
+                        model_prediction_emb = self.model.decoder.embeddings(model_predictions)
+
+                    # Get the embeddings of the gold target sequence.
+                    tgt_emb = self.model.decoder.embeddings(tgt)
+
+                    # 3. Combine the gold target with the model predictions
+                    if self._peeling_back == 'strict':
+                        # Combine the two sequences with peelingback
+                        # First part from the gold, second part from the model predictions
+                        tf_tgt_emb = torch.cat((tgt_emb[:tf_tgt_section], \
+                                model_prediction_emb[tf_tgt_section:]))
+                    else:
+                        # Use scheduled sampling - on each step decide 
+                        # whether to use teacher forcing or model predictions.
+                        tf_tgt_emb = [tgt_emb[i].unsqueeze(0) \
+                                if random.random() <= teacher_forcing_ratio else \
+                                model_prediction_emb[i].unsqueeze(0) for i in range(target_size-1)]
+                        # tf_tgt_emb.append(tgt_emb[-1].unsqueeze(0))
+                        tf_tgt_emb = torch.cat((tf_tgt_emb), dim=0)
+                    # Rerun the forward pass with the new target context
+                    outputs, attns = self.model.decoder(tgt, memory_bank,
+                                    memory_lengths=lengths, step=None, tf_emb=tf_tgt_emb)
+
             else:
+                # RNN
                 enc_state, memory_bank, lengths = \
                     self.model.encoder(src, src_lengths)
                 self.model.decoder.init_state(src, memory_bank, enc_state)
@@ -377,6 +492,9 @@ class Trainer(object):
                 outputs = torch.cat(out_list)
 
             # 3. Compute loss in shards for memory efficiency.
+            # print('memory sizes:', trunc_size, self.shard_size, len(batch), outputs.shape)
+            # print('before loss:', outputs.shape)
+            # print('batch:', batch)
             batch_stats = self._train_loss.sharded_compute_loss(
                 batch, outputs, attns, j,
                 trunc_size, self.shard_size, normalization)

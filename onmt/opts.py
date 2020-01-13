@@ -470,6 +470,19 @@ def train_opts(parser):
               end of the sequence. Strict=the specified of teacher forcing
               ratio defines the part of the sequnce which uses teacher forcing,
               the rest of the sequence uses the model predictions.""")
+    group.add('--transformer_passone', '-transformer_passone', type=str, default='nograd',
+              choices=['grad', 'nograd'],
+              help="""When using scheduled sampling for transformer, 
+              use no_grad or not for the first pass.""")
+    group.add('--transformer_scheduled_activation', '-transformer_scheduled_activation', 
+              type=str, default='softmax',
+              choices=['softmax', 'sparsemax', 'gumbel', 'softmax_temp'],
+              help="""When using scheduled sampling for transformer, 
+              specify the activation used for merging the previous step embeddings.""")
+    group.add('--transformer_scheduled_alpha', '-transformer_scheduled_alpha', 
+              type=float, default=1.0,
+              help="""When using scheduled sampling for transformer, 
+              define the softmax temperature used for merging the previous step embeddings.""")
 
     # learning rate
     group = parser.add_argument_group('Optimization- Rate')
